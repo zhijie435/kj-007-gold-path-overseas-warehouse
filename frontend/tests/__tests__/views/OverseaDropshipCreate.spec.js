@@ -408,3 +408,345 @@ describe('OverseaDropship/Create.vue - Wizard and validation', () => {
     })
   })
 })
+
+import { createDropshipOrder } from '@/api/dropship'
+
+describe('OverseaDropship/Create.vue - Golden Path: Full Interaction Flows', () => {
+  let wrapper
+  let mockRouter
+  let mockMessage
+  let mockConfirm
+
+  const mountWithMocks = (confirmResolved = Promise.resolve()) => {
+    const localVue = createLocalVue()
+    localVue.use(ElementUI)
+    mockRouter = { back: jest.fn(), push: jest.fn() }
+    mockMessage = buildMockMessage()
+    mockConfirm = jest.fn(() => confirmResolved)
+    wrapper = mount(CreatePage, {
+      localVue,
+      mocks: {
+        $router: mockRouter,
+        $message: mockMessage,
+        $confirm: mockConfirm,
+        $refs: { receiverForm: { validate: jest.fn((cb) => cb(true)) } }
+      }
+    })
+    wrapper.setData({
+      receiverForm: {
+        name: 'John Doe',
+        phone: '+15551234567',
+        email: 'john@example.com',
+        country: 'US',
+        state: 'CA',
+        city: 'Los Angeles',
+        postalCode: '90001',
+        address: '123 Sunset Blvd'
+      },
+      productItems: [
+        { sku: 'SKU-001', name: 'Wireless Headphone', spec: 'Black', quantity: 2, price: 49.99, subtotal: 99.98, weight: 0.3, hsCode: '851830', batchNo: 'B2026' }
+      ],
+      shippingForm: {
+        warehouseId: 1,
+        shippingMethod: 'fedex_ground',
+        declaredValue: 99.98,
+        currency: 'USD',
+        handlingFee: 3,
+        shippingFee: 8.5,
+        insuranceEnabled: true,
+        insuranceFee: 2
+      },
+      submitRemark: 'Urgent order'
+    })
+    jest.clearAllMocks()
+    createDropshipOrder.mockClear()
+  }
+
+  afterEach(() => {
+    if (wrapper) wrapper.destroy()
+  })
+
+  describe('handleSaveDraft', () => {
+    it('golden path: confirm → buildOrderData(submit_now=false) → API → success message → navigate to list', async () => {
+      mountWithMocks(Promise.resolve())
+      createDropshipOrder.mockResolvedValue({
+        data: { success: true, data: { dropship_no: 'DS202606210099' } }
+      })
+
+      wrapper.vm.handleSaveDraft()
+      await wrapper.vm.$nextTick()
+
+      expect(mockConfirm).toHaveBeenCalledWith(
+        '确认保存为草稿吗？保存后可以后续再提交审核。',
+        '保存确认',
+        expect.objectContaining({ confirmButtonText: '保存草稿', type: 'info' })
+      )
+      expect(wrapper.vm.submitLoading).toBe(true)
+
+      await Promise.resolve()
+      await wrapper.vm.$nextTick()
+
+      expect(createDropshipOrder).toHaveBeenCalledTimes(1)
+      const payload = createDropshipOrder.mock.calls[0][0]
+      expect(payload.submit_now).toBe(false)
+      expect(payload.receiver_name).toBe('John Doe')
+      expect(payload.warehouse_id).toBe(1)
+      expect(payload.items.length).toBe(1)
+      expect(payload.items[0].sku).toBe('SKU-001')
+
+      await wrapper.vm.$nextTick()
+      expect(wrapper.vm.submitLoading).toBe(false)
+      expect(mockMessage.success).toHaveBeenCalledWith('代发单【DS202606210099】已保存为草稿')
+      expect(mockRouter.push).toHaveBeenCalledWith({ path: '/dropship/orders' })
+    })
+
+    it('user cancels the confirm dialog: no API call, no navigation', async () => {
+      mountWithMocks(Promise.reject())
+      wrapper.vm.handleSaveDraft()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve().catch(() => {})
+      await wrapper.vm.$nextTick()
+      expect(createDropshipOrder).not.toHaveBeenCalled()
+      expect(mockRouter.push).not.toHaveBeenCalled()
+      expect(wrapper.vm.submitLoading).toBe(false)
+    })
+
+    it('API returns success=false: shows error message with server message', async () => {
+      mountWithMocks(Promise.resolve())
+      createDropshipOrder.mockResolvedValue({
+        data: { success: false, message: '商品SKU不存在' }
+      })
+
+      wrapper.vm.handleSaveDraft()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve()
+      await wrapper.vm.$nextTick()
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.vm.submitLoading).toBe(false)
+      expect(mockMessage.error).toHaveBeenCalledWith('商品SKU不存在')
+      expect(mockRouter.push).not.toHaveBeenCalled()
+    })
+
+    it('API returns success=false without message: shows default error', async () => {
+      mountWithMocks(Promise.resolve())
+      createDropshipOrder.mockResolvedValue({ data: { success: false } })
+
+      wrapper.vm.handleSaveDraft()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve()
+      await wrapper.vm.$nextTick()
+      await wrapper.vm.$nextTick()
+
+      expect(mockMessage.error).toHaveBeenCalledWith('保存失败')
+    })
+
+    it('API throws Network Error: catch block shows error.message', async () => {
+      mountWithMocks(Promise.resolve())
+      createDropshipOrder.mockRejectedValue(new Error('Network Error'))
+
+      wrapper.vm.handleSaveDraft()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve()
+      try { await Promise.resolve() } catch (e) {}
+      await wrapper.vm.$nextTick()
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.vm.submitLoading).toBe(false)
+      expect(mockMessage.error).toHaveBeenCalledWith('Network Error')
+    })
+
+    it('API throws error without message: shows default 保存失败', async () => {
+      mountWithMocks(Promise.resolve())
+      createDropshipOrder.mockRejectedValue({})
+
+      wrapper.vm.handleSaveDraft()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve()
+      await wrapper.vm.$nextTick()
+      await wrapper.vm.$nextTick()
+
+      expect(mockMessage.error).toHaveBeenCalledWith('保存失败')
+    })
+  })
+
+  describe('handleSubmit', () => {
+    it('golden path: confirm → buildOrderData(submit_now=true) → API → success message → navigate to list', async () => {
+      mountWithMocks(Promise.resolve())
+      createDropshipOrder.mockResolvedValue({
+        data: { success: true, data: { dropship_no: 'DS202606210100' } }
+      })
+
+      wrapper.vm.handleSubmit()
+      await wrapper.vm.$nextTick()
+
+      expect(mockConfirm).toHaveBeenCalledWith(
+        '确认提交此代发单吗？提交后将进入审核流程，可能会触发自动化规则。',
+        '提交确认',
+        expect.objectContaining({ confirmButtonText: '确认提交', type: 'success' })
+      )
+      expect(wrapper.vm.submitLoading).toBe(true)
+
+      await Promise.resolve()
+      await wrapper.vm.$nextTick()
+
+      expect(createDropshipOrder).toHaveBeenCalledTimes(1)
+      const payload = createDropshipOrder.mock.calls[0][0]
+      expect(payload.submit_now).toBe(true)
+      expect(payload.remark).toBe('Urgent order')
+      expect(payload.shipping_method_code).toBe('fedex_ground')
+
+      await wrapper.vm.$nextTick()
+      expect(wrapper.vm.submitLoading).toBe(false)
+      expect(mockMessage.success).toHaveBeenCalledWith('代发单【DS202606210100】创建成功，已提交审核')
+      expect(mockRouter.push).toHaveBeenCalledWith({ path: '/dropship/orders' })
+    })
+
+    it('user cancels the confirm dialog: no API call, no navigation', async () => {
+      mountWithMocks(Promise.reject())
+      wrapper.vm.handleSubmit()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve().catch(() => {})
+      await wrapper.vm.$nextTick()
+      expect(createDropshipOrder).not.toHaveBeenCalled()
+      expect(mockRouter.push).not.toHaveBeenCalled()
+      expect(wrapper.vm.submitLoading).toBe(false)
+    })
+
+    it('API returns success=false with message: shows server error', async () => {
+      mountWithMocks(Promise.resolve())
+      createDropshipOrder.mockResolvedValue({
+        data: { success: false, message: '仓库库存不足' }
+      })
+
+      wrapper.vm.handleSubmit()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve()
+      await wrapper.vm.$nextTick()
+      await wrapper.vm.$nextTick()
+
+      expect(mockMessage.error).toHaveBeenCalledWith('仓库库存不足')
+      expect(mockRouter.push).not.toHaveBeenCalled()
+    })
+
+    it('API throws exception: catch block shows error', async () => {
+      mountWithMocks(Promise.resolve())
+      createDropshipOrder.mockRejectedValue(new Error('500 Internal Server Error'))
+
+      wrapper.vm.handleSubmit()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve()
+      await wrapper.vm.$nextTick()
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.vm.submitLoading).toBe(false)
+      expect(mockMessage.error).toHaveBeenCalledWith('500 Internal Server Error')
+    })
+
+    it('API throws exception without message: shows default 提交失败', async () => {
+      mountWithMocks(Promise.resolve())
+      createDropshipOrder.mockRejectedValue({})
+
+      wrapper.vm.handleSubmit()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve()
+      await wrapper.vm.$nextTick()
+      await wrapper.vm.$nextTick()
+
+      expect(mockMessage.error).toHaveBeenCalledWith('提交失败')
+    })
+  })
+
+  describe('handleBack', () => {
+    it('confirm 确认后调用 $router.back()', async () => {
+      mountWithMocks(Promise.resolve())
+      wrapper.vm.handleBack()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve()
+      await wrapper.vm.$nextTick()
+      expect(mockConfirm).toHaveBeenCalledWith(
+        '返回后当前填写的信息将丢失，确定返回吗？',
+        '提示',
+        expect.objectContaining({ type: 'warning' })
+      )
+      expect(mockRouter.back).toHaveBeenCalled()
+    })
+
+    it('用户取消confirm 不触发路由跳转', async () => {
+      mountWithMocks(Promise.reject())
+      wrapper.vm.handleBack()
+      await wrapper.vm.$nextTick()
+      await Promise.resolve().catch(() => {})
+      await wrapper.vm.$nextTick()
+      expect(mockRouter.back).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('nextStep step 0: receiver form validation callback', () => {
+    it('validate returns invalid → warning message, step stays at 0', async () => {
+      const localVue = createLocalVue()
+      localVue.use(ElementUI)
+      mockRouter = { back: jest.fn(), push: jest.fn() }
+      mockMessage = buildMockMessage()
+      const mockValidate = jest.fn((cb) => cb(false))
+      wrapper = mount(CreatePage, {
+        localVue,
+        mocks: {
+          $router: mockRouter,
+          $message: mockMessage,
+          $confirm: jest.fn(() => Promise.resolve()),
+          $refs: { receiverForm: { validate: mockValidate } }
+        }
+      })
+      wrapper.setData({ activeStep: 0 })
+      wrapper.vm.nextStep(0)
+      expect(mockValidate).toHaveBeenCalled()
+      expect(mockMessage.warning).toHaveBeenCalledWith('请完整填写收件人信息')
+      expect(wrapper.vm.activeStep).toBe(0)
+    })
+
+    it('validate returns valid → activeStep increments to 1', async () => {
+      const localVue = createLocalVue()
+      localVue.use(ElementUI)
+      mockMessage = buildMockMessage()
+      const mockValidate = jest.fn((cb) => cb(true))
+      wrapper = mount(CreatePage, {
+        localVue,
+        mocks: {
+          $router: { back: jest.fn(), push: jest.fn() },
+          $message: mockMessage,
+          $confirm: jest.fn(() => Promise.resolve()),
+          $refs: { receiverForm: { validate: mockValidate } }
+        }
+      })
+      wrapper.setData({ activeStep: 0 })
+      wrapper.vm.nextStep(0)
+      expect(wrapper.vm.activeStep).toBe(1)
+    })
+  })
+
+  describe('nextStep step 2: declaredValue and calcTotalCost auto-populate', () => {
+    it('sets declaredValue = totalProductAmount before advancing', () => {
+      mountWithMocks(Promise.resolve())
+      wrapper.setData({
+        activeStep: 2,
+        productItems: [
+          { sku: 'A', name: 'P1', quantity: 2, price: 100, subtotal: 200, weight: 1 }
+        ],
+        shippingForm: {
+          warehouseId: 1,
+          shippingMethod: 'fedex_ground',
+          declaredValue: 0,
+          insuranceEnabled: true,
+          insuranceFee: 0,
+          handlingFee: 0,
+          shippingFee: 0
+        }
+      })
+      wrapper.vm.nextStep(2)
+      expect(wrapper.vm.shippingForm.declaredValue).toBe(200)
+      expect(wrapper.vm.shippingForm.insuranceFee).toBeCloseTo(4, 2)
+      expect(wrapper.vm.activeStep).toBe(3)
+    })
+  })
+})

@@ -219,3 +219,149 @@ describe('api/dropship.js - API methods', () => {
     })
   })
 })
+
+describe('api/dropship.js - Error propagation (exception branches)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  describe('Network Error propagation', () => {
+    it('getDropshipOrders propagates Network Error thrown by request', async () => {
+      mockRequest.mockRejectedValueOnce(new Error('Network Error'))
+      await expect(api.getDropshipOrders({ page: 1 })).rejects.toThrow('Network Error')
+    })
+
+    it('createDropshipOrder propagates Network Error with data intact', async () => {
+      mockRequest.mockRejectedValueOnce(new Error('Network Error'))
+      const data = { receiver_name: 'X' }
+      await expect(api.createDropshipOrder(data)).rejects.toThrow('Network Error')
+      expect(request).toHaveBeenCalledWith({
+        url: '/dropship/orders',
+        method: 'post',
+        data
+      })
+    })
+
+    it('pushDropshipOrder propagates Network Error', async () => {
+      mockRequest.mockRejectedValueOnce(new Error('Network Error'))
+      await expect(api.pushDropshipOrder(1)).rejects.toThrow('Network Error')
+    })
+
+    it('reviewDropshipOrder propagates Network Error', async () => {
+      mockRequest.mockRejectedValueOnce(new Error('Network Error'))
+      await expect(api.reviewDropshipOrder(1, { pass: true })).rejects.toThrow('Network Error')
+    })
+  })
+
+  describe('HTTP 404 Not Found error handling', () => {
+    it('getDropshipOrder(99999) surfaces 404 error from request layer', async () => {
+      const notFoundErr = new Error('Request failed with status code 404')
+      notFoundErr.response = { status: 404, data: { message: 'Order not found' } }
+      mockRequest.mockRejectedValueOnce(notFoundErr)
+      try {
+        await api.getDropshipOrder(99999)
+        fail('Expected promise to reject')
+      } catch (e) {
+        expect(e.message).toContain('404')
+        expect(e.response.status).toBe(404)
+        expect(e.response.data.message).toBe('Order not found')
+      }
+    })
+
+    it('updateDropshipOrder non-existent id surfaces 404', async () => {
+      const notFoundErr = new Error('404')
+      notFoundErr.response = { status: 404 }
+      mockRequest.mockRejectedValueOnce(notFoundErr)
+      await expect(api.updateDropshipOrder(9999, {})).rejects.toThrow('404')
+    })
+
+    it('deleteDropshipOrder non-existent id surfaces 404', async () => {
+      const notFoundErr = new Error('Not Found')
+      notFoundErr.response = { status: 404 }
+      mockRequest.mockRejectedValueOnce(notFoundErr)
+      await expect(api.deleteDropshipOrder(9999)).rejects.toThrow('Not Found')
+    })
+  })
+
+  describe('HTTP 500 Internal Server Error handling', () => {
+    it('batchReviewDropshipOrders propagates 500 error with response body', async () => {
+      const serverErr = new Error('Internal Server Error')
+      serverErr.response = {
+        status: 500,
+        data: { success: false, message: 'Database connection failed' }
+      }
+      mockRequest.mockRejectedValueOnce(serverErr)
+      try {
+        await api.batchReviewDropshipOrders({ ids: [1, 2, 3], pass: true })
+        fail('Expected rejection')
+      } catch (e) {
+        expect(e.response.status).toBe(500)
+        expect(e.response.data.message).toBe('Database connection failed')
+      }
+    })
+
+    it('batchPushDropshipOrders surfaces 500 error', async () => {
+      const serverErr = new Error('500')
+      serverErr.response = { status: 500, data: { message: 'WMS service unavailable' } }
+      mockRequest.mockRejectedValueOnce(serverErr)
+      await expect(api.batchPushDropshipOrders({ ids: [1, 2] })).rejects.toThrow('500')
+    })
+
+    it('syncDropshipTracking propagates 500 error', async () => {
+      const serverErr = new Error('500 Internal')
+      serverErr.response = { status: 500 }
+      mockRequest.mockRejectedValueOnce(serverErr)
+      await expect(api.syncDropshipTracking(5)).rejects.toThrow('500 Internal')
+    })
+  })
+
+  describe('Edge case: request rejects with non-Error object', () => {
+    it('cancelDropshipOrder handles plain object rejection', async () => {
+      mockRequest.mockRejectedValueOnce({ code: 'ECONNABORTED' })
+      try {
+        await api.cancelDropshipOrder(7, { reason: 'test' })
+        fail('Should reject')
+      } catch (e) {
+        expect(e.code).toBe('ECONNABORTED')
+      }
+    })
+
+    it('retryPushDropshipOrder handles string rejection', async () => {
+      mockRequest.mockRejectedValueOnce('timeout')
+      try {
+        await api.retryPushDropshipOrder(11)
+        fail('Should reject')
+      } catch (e) {
+        expect(e).toBe('timeout')
+      }
+    })
+  })
+
+  describe('Edge case: empty/undefined/null parameters', () => {
+    it('getDropshipOrder with undefined id still builds correct url (empty string)', async () => {
+      await api.getDropshipOrder(undefined)
+      expect(request).toHaveBeenCalledWith({
+        url: '/dropship/orders/undefined',
+        method: 'get'
+      })
+    })
+
+    it('getDropshipStatistics with undefined params', async () => {
+      await api.getDropshipStatistics(undefined)
+      expect(request).toHaveBeenCalledWith({
+        url: '/dropship/statistics',
+        method: 'get',
+        params: undefined
+      })
+    })
+
+    it('updateDropshipOrderStatus with null status', async () => {
+      await api.updateDropshipOrderStatus(1, null)
+      expect(request).toHaveBeenCalledWith({
+        url: '/dropship/orders/1/update-status',
+        method: 'post',
+        data: null
+      })
+    })
+  })
+})

@@ -527,3 +527,293 @@ describe('OverseaDropship/Detail.vue - Status steps and transitions', () => {
     })
   })
 })
+
+describe('OverseaDropship/Detail.vue - Golden Path: Full Interaction Flows', () => {
+  let wrapper
+  let mockRouter
+  let mockMessage
+  let mockLoadingClose
+  let mockLoading
+  let api
+
+  const flushPromises = () => new Promise(resolve => setTimeout(resolve, 10))
+
+  const mountWithMocks = (id = '1', extraMocks = {}) => {
+    const localVue = createLocalVue()
+    localVue.use(ElementUI)
+    mockRouter = { back: jest.fn(), push: jest.fn() }
+    mockMessage = {
+      success: jest.fn(),
+      warning: jest.fn(),
+      error: jest.fn(),
+      info: jest.fn()
+    }
+    mockLoadingClose = jest.fn()
+    mockLoading = jest.fn(() => ({ close: mockLoadingClose }))
+    api = require('@/api/dropship')
+    jest.clearAllMocks()
+
+    wrapper = mount(DetailPage, {
+      localVue,
+      mocks: {
+        $router: mockRouter,
+        $route: { params: { id } },
+        $message: mockMessage,
+        $confirm: jest.fn(() => Promise.resolve()),
+        $prompt: jest.fn(() => Promise.resolve({ value: 'test' })),
+        $loading: mockLoading,
+        ...extraMocks
+      }
+    })
+  }
+
+  afterEach(() => {
+    if (wrapper) wrapper.destroy()
+  })
+
+  describe('loadOrder - data loading on mount', () => {
+    it('calls getDropshipOrder API with route id on mount', async () => {
+      mountWithMocks('42')
+      await flushPromises()
+      expect(api.getDropshipOrder).toHaveBeenCalledWith('42')
+    })
+
+    it('maps detail fields correctly including nested items and warehouse', async () => {
+      mountWithMocks('1')
+      await flushPromises()
+      expect(wrapper.vm.detail.id).toBe(1)
+      expect(wrapper.vm.detail.dropshipNo).toBe('DS001')
+      expect(wrapper.vm.detail.status).toBe('pending_review')
+      expect(wrapper.vm.detail.receiverName).toBe('John')
+      expect(wrapper.vm.detail.receiverCountry).toBe('US')
+      expect(wrapper.vm.detail.warehouseName).toBe('US Warehouse')
+      expect(wrapper.vm.detail.warehouseCode).toBe('US-LAX')
+      expect(wrapper.vm.detail.shippingMethodCode).toBe('fedex')
+      expect(wrapper.vm.detail.totalCost).toBe(67)
+      expect(wrapper.vm.detail.items.length).toBe(1)
+      expect(wrapper.vm.detail.items[0].sku).toBe('A')
+      expect(wrapper.vm.detail.items[0].name).toBe('P1')
+      expect(wrapper.vm.detail.items[0].quantity).toBe(1)
+    })
+
+    it('maps numeric fields (subtotal, weight, etc.) as numbers not strings', async () => {
+      mountWithMocks('1')
+      await flushPromises()
+      expect(typeof wrapper.vm.detail.subtotal).toBe('number')
+      expect(typeof wrapper.vm.detail.shippingFee).toBe('number')
+      expect(typeof wrapper.vm.detail.handlingFee).toBe('number')
+      expect(typeof wrapper.vm.detail.totalCost).toBe('number')
+      expect(typeof wrapper.vm.detail.declaredValue).toBe('number')
+      expect(typeof wrapper.vm.detail.weight).toBe('number')
+      expect(typeof wrapper.vm.detail.items[0].quantity).toBe('number')
+      expect(typeof wrapper.vm.detail.items[0].price).toBe('number')
+    })
+  })
+
+  describe('handleReviewPass - golden flow: approve order', () => {
+    beforeEach(async () => {
+      mountWithMocks('1')
+      await flushPromises()
+      wrapper.setData({ detail: { ...wrapper.vm.detail, status: 'pending_review' } })
+    })
+
+    it('confirms via $confirm then calls reviewDropshipOrder with pass=true', async () => {
+      const confirmSpy = jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
+      await wrapper.vm.handleReviewPass()
+      await flushPromises()
+      expect(confirmSpy).toHaveBeenCalled()
+      expect(api.reviewDropshipOrder).toHaveBeenCalledWith(1, { pass: true })
+      expect(mockMessage.success).toHaveBeenCalledWith('审核成功')
+    })
+
+    it('sets reviewLoading=true during API call and resets after', async () => {
+      jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
+      const p = wrapper.vm.handleReviewPass()
+      expect(wrapper.vm.reviewLoading).toBe(true)
+      await p
+      await flushPromises()
+      expect(wrapper.vm.reviewLoading).toBe(false)
+    })
+
+    it('reloadOrder is called after successful review', async () => {
+      jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
+      const loadSpy = jest.spyOn(wrapper.vm, 'loadOrder')
+      await wrapper.vm.handleReviewPass()
+      await flushPromises()
+      expect(loadSpy).toHaveBeenCalled()
+    })
+
+    it('user cancels confirm dialog: no API call, no loading flag', async () => {
+      jest.spyOn(wrapper.vm, '$confirm').mockRejectedValue()
+      await wrapper.vm.handleReviewPass()
+      expect(api.reviewDropshipOrder).not.toHaveBeenCalled()
+      expect(wrapper.vm.reviewLoading).toBe(false)
+    })
+  })
+
+  describe('handlePush - golden flow: push to WMS', () => {
+    beforeEach(async () => {
+      mountWithMocks('1')
+      await flushPromises()
+      wrapper.setData({ detail: { ...wrapper.vm.detail, status: 'review_pass' } })
+    })
+
+    it('confirms, checks canTransitionTo, and calls pushDropshipOrder', async () => {
+      const confirmSpy = jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
+      await wrapper.vm.handlePush()
+      await flushPromises()
+      expect(confirmSpy).toHaveBeenCalled()
+      expect(api.pushDropshipOrder).toHaveBeenCalledWith(1)
+      expect(mockMessage.success).toHaveBeenCalledWith('推送成功')
+    })
+
+    it('sets pushLoading=true during call, resets after', async () => {
+      jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
+      const p = wrapper.vm.handlePush()
+      expect(wrapper.vm.pushLoading).toBe(true)
+      await p
+      await flushPromises()
+      expect(wrapper.vm.pushLoading).toBe(false)
+    })
+
+    it('reloadOrder called after successful push', async () => {
+      jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
+      const loadSpy = jest.spyOn(wrapper.vm, 'loadOrder')
+      await wrapper.vm.handlePush()
+      await flushPromises()
+      expect(loadSpy).toHaveBeenCalled()
+    })
+
+    it('draft status blocked: warning shown, API not called', async () => {
+      wrapper.setData({ detail: { ...wrapper.vm.detail, status: 'draft' } })
+      jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
+      try {
+        await wrapper.vm.handlePush()
+      } catch (e) {}
+      await flushPromises()
+      expect(mockMessage.warning).toHaveBeenCalledWith(
+        expect.stringContaining('不允许推送')
+      )
+      expect(api.pushDropshipOrder).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('handleStatusCommand - golden flow: manual status update', () => {
+    beforeEach(async () => {
+      mountWithMocks('1')
+      await flushPromises()
+      wrapper.setData({ detail: { ...wrapper.vm.detail, status: 'push_success' } })
+    })
+
+    it('valid transition calls updateDropshipOrderStatus API', async () => {
+      jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
+      await wrapper.vm.handleStatusCommand('processing')
+      await flushPromises()
+      expect(api.updateDropshipOrderStatus).toHaveBeenCalledWith(1, { status: 'processing' })
+      expect(mockMessage.success).toHaveBeenCalledWith('状态已更新')
+    })
+
+    it('invalid transition shows warning, API not called', async () => {
+      wrapper.setData({ detail: { ...wrapper.vm.detail, status: 'completed' } })
+      const spy = jest.spyOn(api, 'updateDropshipOrderStatus')
+      await wrapper.vm.handleStatusCommand('processing')
+      expect(mockMessage.warning).toHaveBeenCalledWith(
+        expect.stringContaining('不允许切换')
+      )
+      expect(spy).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('handleRetry - golden flow: retry push', () => {
+    beforeEach(async () => {
+      mountWithMocks('1')
+      await flushPromises()
+      wrapper.setData({ detail: { ...wrapper.vm.detail, status: 'push_failed' } })
+    })
+
+    it('confirms then calls retryPushDropshipOrder API', async () => {
+      jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
+      await wrapper.vm.handleRetry()
+      await flushPromises()
+      expect(api.retryPushDropshipOrder).toHaveBeenCalledWith(1)
+      expect(mockMessage.success).toHaveBeenCalledWith('重试成功')
+    })
+
+    it('non-retryable status blocked (e.g. draft)', async () => {
+      wrapper.setData({ detail: { ...wrapper.vm.detail, status: 'draft' } })
+      jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
+      await wrapper.vm.handleRetry()
+      await flushPromises()
+      expect(mockMessage.warning).toHaveBeenCalledWith(
+        expect.stringContaining('不允许重试')
+      )
+      expect(api.retryPushDropshipOrder).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('handleCancel - golden flow: cancel order', () => {
+    beforeEach(async () => {
+      mountWithMocks('1')
+      await flushPromises()
+      wrapper.setData({ detail: { ...wrapper.vm.detail, status: 'review_pass' } })
+    })
+
+    it('prompts for reason then calls cancelDropshipOrder API', async () => {
+      jest.spyOn(wrapper.vm, '$prompt').mockResolvedValue({ value: 'No longer needed' })
+      await wrapper.vm.handleCancel()
+      await flushPromises()
+      expect(api.cancelDropshipOrder).toHaveBeenCalledWith(1, { reason: 'No longer needed' })
+      expect(mockMessage.success).toHaveBeenCalledWith('订单已取消')
+    })
+
+    it('cancellable status check: completed blocked', async () => {
+      wrapper.setData({ detail: { ...wrapper.vm.detail, status: 'completed' } })
+      await wrapper.vm.handleCancel()
+      expect(mockMessage.warning).toHaveBeenCalledWith(
+        expect.stringContaining('不允许取消')
+      )
+      expect(api.cancelDropshipOrder).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('refreshTracking - golden flow: sync tracking with loading', () => {
+    beforeEach(async () => {
+      mountWithMocks('1')
+      await flushPromises()
+    })
+
+    it('shows $loading overlay while syncing, closes after', async () => {
+      await wrapper.vm.refreshTracking()
+      expect(mockLoading).toHaveBeenCalled()
+      expect(api.syncDropshipTracking).toHaveBeenCalledWith(1)
+      await flushPromises()
+      expect(mockLoadingClose).toHaveBeenCalled()
+    })
+
+    it('shows success message with record count after sync', async () => {
+      await wrapper.vm.refreshTracking()
+      await flushPromises()
+      expect(mockMessage.success).toHaveBeenCalledWith(
+        expect.stringContaining('已更新')
+      )
+    })
+  })
+
+  describe('copyTrackingNo - golden flow: copy to clipboard', () => {
+    beforeEach(async () => {
+      mountWithMocks('1')
+      await flushPromises()
+    })
+
+    it('uses execCommand to copy and shows success', () => {
+      wrapper.setData({
+        detail: { ...wrapper.vm.detail, trackingNo: '1Z999AA10123456784' }
+      })
+      const mockExec = jest.spyOn(document, 'execCommand').mockReturnValue(true)
+      wrapper.vm.copyTrackingNo()
+      expect(mockExec).toHaveBeenCalledWith('copy')
+      expect(mockMessage.success).toHaveBeenCalledWith('运单号已复制')
+      mockExec.mockRestore()
+    })
+  })
+})

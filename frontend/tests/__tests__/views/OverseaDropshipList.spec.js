@@ -322,3 +322,397 @@ describe('OverseaDropship/List.vue - Status permission methods', () => {
     })
   })
 })
+
+describe('OverseaDropship/List.vue - Golden Path: Full Interaction Flows', () => {
+  let wrapper
+  let mockRouter
+  let mockMessage
+  let api
+
+  const flushPromises = () => new Promise(resolve => setTimeout(resolve, 10))
+
+  const mountWithMocks = (extra = {}) => {
+    const localVue = createLocalVue()
+    localVue.use(ElementUI)
+    mockRouter = { push: jest.fn() }
+    mockMessage = {
+      success: jest.fn(),
+      warning: jest.fn(),
+      error: jest.fn(),
+      info: jest.fn()
+    }
+    jest.clearAllMocks()
+    api = require('@/api/dropship')
+
+    wrapper = mount(ListPage, {
+      localVue,
+      mocks: {
+        $router: mockRouter,
+        $message: mockMessage,
+        $confirm: jest.fn(() => Promise.resolve()),
+        $prompt: jest.fn(() => Promise.resolve({ value: 'test-reason' })),
+        ...extra
+      }
+    })
+  }
+
+  afterEach(() => {
+    if (wrapper) wrapper.destroy()
+  })
+
+  describe('fetchOptions - status and channel options loading', () => {
+    it('fetches status and channel options on mount', async () => {
+      mountWithMocks()
+      await flushPromises()
+      expect(api.getDropshipStatusOptions).toHaveBeenCalled()
+      expect(api.getDropshipChannelOptions).toHaveBeenCalled()
+    })
+
+    it('maps status options from API response to statusOptions array', async () => {
+      mountWithMocks()
+      await flushPromises()
+      expect(wrapper.vm.statusOptions.length).toBeGreaterThan(0)
+      expect(wrapper.vm.statusOptions[0].value).toBe('draft')
+      expect(wrapper.vm.statusOptions[0].label).toBe('草稿')
+    })
+
+    it('channelOptions populated from API response', async () => {
+      mountWithMocks()
+      await flushPromises()
+      expect(Array.isArray(wrapper.vm.channelOptions)).toBe(true)
+    })
+  })
+
+  describe('fetchList - list data loading with filters', () => {
+    beforeEach(async () => {
+      mountWithMocks()
+      await flushPromises()
+    })
+
+    it('sets loading=true while fetching, false after', async () => {
+      const p = wrapper.vm.fetchList()
+      expect(wrapper.vm.loading).toBe(true)
+      await p
+      await flushPromises()
+      expect(wrapper.vm.loading).toBe(false)
+    })
+
+    it('includes pagination params in API call', async () => {
+      wrapper.setData({ pagination: { currentPage: 2, pageSize: 50 } })
+      await wrapper.vm.fetchList()
+      await flushPromises()
+      expect(api.getDropshipOrders).toHaveBeenCalledWith(
+        expect.objectContaining({ page: 2, per_page: 50 })
+      )
+    })
+
+    it('includes keyword filter when set', async () => {
+      wrapper.setData({ filterForm: { keyword: 'DS001', status: [], warehouseId: null, channel: null, country: null, dateRange: [] } })
+      await wrapper.vm.fetchList()
+      await flushPromises()
+      expect(api.getDropshipOrders).toHaveBeenCalledWith(
+        expect.objectContaining({ keyword: 'DS001' })
+      )
+    })
+
+    it('includes status filter (join by comma) when selected', async () => {
+      wrapper.setData({ filterForm: { keyword: '', status: ['pending_review', 'review_pass'], warehouseId: null, channel: null, country: null, dateRange: [] } })
+      await wrapper.vm.fetchList()
+      await flushPromises()
+      expect(api.getDropshipOrders).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'pending_review,review_pass' })
+      )
+    })
+
+    it('includes warehouse_id, source_channel, receiver_country filters', async () => {
+      wrapper.setData({ filterForm: { keyword: '', status: [], warehouseId: 3, channel: 'shopify', country: 'JP', dateRange: [] } })
+      await wrapper.vm.fetchList()
+      await flushPromises()
+      const callArgs = api.getDropshipOrders.mock.calls[0][0]
+      expect(callArgs.warehouse_id).toBe(3)
+      expect(callArgs.source_channel).toBe('shopify')
+      expect(callArgs.receiver_country).toBe('JP')
+    })
+
+    it('includes date_range when both start and end present', async () => {
+      wrapper.setData({ filterForm: { keyword: '', status: [], warehouseId: null, channel: null, country: null, dateRange: ['2026-01-01', '2026-06-21'] } })
+      await wrapper.vm.fetchList()
+      await flushPromises()
+      const callArgs = api.getDropshipOrders.mock.calls[0][0]
+      expect(callArgs.date_range).toEqual(['2026-01-01', '2026-06-21'])
+    })
+
+    it('maps response data to tableData and total', async () => {
+      // default mock returns { data: [], total: 0 }
+      expect(wrapper.vm.tableData).toEqual([])
+      expect(wrapper.vm.total).toBe(0)
+    })
+  })
+
+  describe('fetchStats - statistics dashboard loading', () => {
+    beforeEach(async () => {
+      mountWithMocks()
+      await flushPromises()
+    })
+
+    it('calls getDropshipStatistics API on mount', async () => {
+      expect(api.getDropshipStatistics).toHaveBeenCalled()
+    })
+
+    it('maps stats fields correctly from snake_case to camelCase', async () => {
+      // override mock for this test with a rich response
+      jest.clearAllMocks()
+      const oldImpl = api.getDropshipStatistics
+      api.getDropshipStatistics = jest.fn(() => Promise.resolve({
+        data: {
+          success: true,
+          data: {
+            pending_review: 42,
+            pending_push: 17,
+            in_transit: 88,
+            exceptions: 5,
+            today: { orders: 12 },
+            completion_rate: 87,
+            warehouses: [
+              { warehouse_id: 1, warehouse_name: 'US LA' },
+              { warehouse_id: 5, warehouse_name: 'JP Tokyo' }
+            ]
+          }
+        }
+      }))
+      wrapper = null
+      mountWithMocks()
+      await flushPromises()
+      expect(wrapper.vm.stats.pendingReview).toBe(42)
+      expect(wrapper.vm.stats.pendingPush).toBe(17)
+      expect(wrapper.vm.stats.inTransit).toBe(88)
+      expect(wrapper.vm.stats.exception).toBe(5)
+      expect(wrapper.vm.stats.todayNew).toBe(12)
+      expect(wrapper.vm.stats.completeRate).toBe(87)
+      expect(wrapper.vm.warehouseOptions).toEqual([
+        { id: 1, name: 'US LA' },
+        { id: 5, name: 'JP Tokyo' }
+      ])
+      api.getDropshipStatistics = oldImpl
+    })
+  })
+
+  describe('submitReview - golden flow: review dialog submit', () => {
+    beforeEach(async () => {
+      mountWithMocks()
+      await flushPromises()
+    })
+
+    it('submits pass review: calls API, shows success, closes dialog, refreshes', async () => {
+      wrapper.setData({
+        currentReviewId: 55,
+        reviewForm: { result: 'pass', remark: '' },
+        reviewDialogVisible: true
+      })
+      await wrapper.vm.submitReview()
+      await flushPromises()
+      expect(api.reviewDropshipOrder).toHaveBeenCalledWith(55, {
+        pass: true,
+        remark: ''
+      })
+      expect(mockMessage.success).toHaveBeenCalledWith('审核成功')
+      expect(wrapper.vm.reviewDialogVisible).toBe(false)
+      expect(wrapper.vm.reviewLoading).toBe(false)
+    })
+
+    it('submits reject review: validates non-empty remark first', async () => {
+      wrapper.setData({
+        currentReviewId: 55,
+        reviewForm: { result: 'reject', remark: '   ' },
+        reviewDialogVisible: true
+      })
+      await wrapper.vm.submitReview()
+      expect(mockMessage.warning).toHaveBeenCalledWith('请填写拒绝原因')
+      expect(api.reviewDropshipOrder).not.toHaveBeenCalled()
+    })
+
+    it('submits reject review with valid remark: calls API with pass=false', async () => {
+      wrapper.setData({
+        currentReviewId: 55,
+        reviewForm: { result: 'reject', remark: 'Missing documentation' },
+        reviewDialogVisible: true
+      })
+      await wrapper.vm.submitReview()
+      await flushPromises()
+      expect(api.reviewDropshipOrder).toHaveBeenCalledWith(55, {
+        pass: false,
+        remark: 'Missing documentation'
+      })
+      expect(mockMessage.success).toHaveBeenCalledWith('审核成功')
+    })
+
+    it('reviewLoading guards during async call', async () => {
+      wrapper.setData({
+        currentReviewId: 1,
+        reviewForm: { result: 'pass', remark: '' },
+        reviewDialogVisible: true
+      })
+      const p = wrapper.vm.submitReview()
+      expect(wrapper.vm.reviewLoading).toBe(true)
+      await p
+      await flushPromises()
+      expect(wrapper.vm.reviewLoading).toBe(false)
+    })
+
+    it('fetchList and fetchStats called after review success', async () => {
+      wrapper.setData({
+        currentReviewId: 1,
+        reviewForm: { result: 'pass', remark: '' },
+        reviewDialogVisible: true
+      })
+      const listSpy = jest.spyOn(wrapper.vm, 'fetchList')
+      const statsSpy = jest.spyOn(wrapper.vm, 'fetchStats')
+      await wrapper.vm.submitReview()
+      await flushPromises()
+      expect(listSpy).toHaveBeenCalled()
+      expect(statsSpy).toHaveBeenCalled()
+    })
+  })
+
+  describe('handleView/handleReview/handleCreate - navigation and dialog opens', () => {
+    beforeEach(async () => {
+      mountWithMocks()
+      await flushPromises()
+    })
+
+    it('handleCreate navigates to /dropship/orders/create', () => {
+      wrapper.vm.handleCreate()
+      expect(mockRouter.push).toHaveBeenCalledWith({ path: '/dropship/orders/create' })
+    })
+
+    it('handleView navigates to order detail page using row.id', () => {
+      wrapper.vm.handleView({ id: 123, dropshipNo: 'DS000123' })
+      expect(mockRouter.push).toHaveBeenCalledWith({ path: '/dropship/orders/123' })
+    })
+
+    it('handleView falls back to dropship_id if id missing', () => {
+      wrapper.vm.handleView({ dropship_id: 456, dropshipNo: 'DS456' })
+      expect(mockRouter.push).toHaveBeenCalledWith({ path: '/dropship/orders/456' })
+    })
+
+    it('handleReview opens review dialog with selected row id', () => {
+      wrapper.vm.handleReview({ id: 77, status: 'pending_review' })
+      expect(wrapper.vm.currentReviewId).toBe(77)
+      expect(wrapper.vm.reviewDialogVisible).toBe(true)
+      expect(wrapper.vm.reviewForm.result).toBe('pass')
+      expect(wrapper.vm.reviewForm.remark).toBe('')
+    })
+  })
+
+  describe('handlePush - golden flow: row action push', () => {
+    beforeEach(async () => {
+      mountWithMocks()
+      await flushPromises()
+    })
+
+    it('confirms, calls API, shows success, refreshes list+stats', async () => {
+      const row = { id: 88, dropshipNo: 'DS88', status: 'review_pass' }
+      await wrapper.vm.handlePush(row)
+      await flushPromises()
+      expect(wrapper.vm.$confirm).toHaveBeenCalled()
+      expect(api.pushDropshipOrder).toHaveBeenCalledWith(88)
+      expect(mockMessage.success).toHaveBeenCalledWith('推送成功')
+    })
+
+    it('uses dropship_no in confirm message when dropshipNo missing', async () => {
+      const row = { id: 99, dropship_no: 'DS-LEGACY-99', status: 'review_pass' }
+      await wrapper.vm.handlePush(row)
+      await flushPromises()
+      expect(api.pushDropshipOrder).toHaveBeenCalledWith(99)
+    })
+  })
+
+  describe('handleCancel - golden flow: cancel via row action', () => {
+    beforeEach(async () => {
+      mountWithMocks()
+      await flushPromises()
+    })
+
+    it('prompts for reason and calls cancel API', async () => {
+      jest.spyOn(wrapper.vm, '$prompt').mockResolvedValue({ value: 'Customer request' })
+      const row = { id: 33, dropshipNo: 'DS33', status: 'pending_review' }
+      await wrapper.vm.handleCancel(row)
+      await flushPromises()
+      expect(api.cancelDropshipOrder).toHaveBeenCalledWith(33, { reason: 'Customer request' })
+      expect(mockMessage.success).toHaveBeenCalledWith('取消成功')
+    })
+  })
+
+  describe('handleRetry - golden flow: retry via row action', () => {
+    beforeEach(async () => {
+      mountWithMocks()
+      await flushPromises()
+    })
+
+    it('confirms and calls retryPushDropshipOrder API', async () => {
+      const row = { id: 101, dropshipNo: 'DS101', status: 'push_failed' }
+      await wrapper.vm.handleRetry(row)
+      await flushPromises()
+      expect(wrapper.vm.$confirm).toHaveBeenCalled()
+      expect(api.retryPushDropshipOrder).toHaveBeenCalledWith(101)
+      expect(mockMessage.success).toHaveBeenCalledWith('重试成功')
+    })
+  })
+
+  describe('handleBatchReview - golden flow: batch review selected orders', () => {
+    beforeEach(async () => {
+      mountWithMocks()
+      await flushPromises()
+    })
+
+    it('confirms then calls batchReviewDropshipOrders with selected ids + pass=true', async () => {
+      wrapper.setData({ selectedIds: [1, 2, 3] })
+      await wrapper.vm.handleBatchReview()
+      await flushPromises()
+      expect(wrapper.vm.$confirm).toHaveBeenCalled()
+      expect(api.batchReviewDropshipOrders).toHaveBeenCalledWith({
+        ids: [1, 2, 3],
+        pass: true
+      })
+      expect(mockMessage.success).toHaveBeenCalledWith('批量审核成功')
+    })
+
+    it('fetches list+stats after batch success', async () => {
+      wrapper.setData({ selectedIds: [1, 2] })
+      const listSpy = jest.spyOn(wrapper.vm, 'fetchList')
+      const statsSpy = jest.spyOn(wrapper.vm, 'fetchStats')
+      await wrapper.vm.handleBatchReview()
+      await flushPromises()
+      expect(listSpy).toHaveBeenCalled()
+      expect(statsSpy).toHaveBeenCalled()
+    })
+  })
+
+  describe('handleBatchPush - golden flow: batch push selected orders', () => {
+    beforeEach(async () => {
+      mountWithMocks()
+      await flushPromises()
+    })
+
+    it('confirms then calls batchPushDropshipOrders with ids', async () => {
+      wrapper.setData({ selectedIds: [10, 20, 30] })
+      await wrapper.vm.handleBatchPush()
+      await flushPromises()
+      expect(wrapper.vm.$confirm).toHaveBeenCalled()
+      expect(api.batchPushDropshipOrders).toHaveBeenCalledWith({
+        ids: [10, 20, 30]
+      })
+      expect(mockMessage.success).toHaveBeenCalledWith('批量推送成功')
+    })
+
+    it('refreshes list+stats after batch push', async () => {
+      wrapper.setData({ selectedIds: [5] })
+      const listSpy = jest.spyOn(wrapper.vm, 'fetchList')
+      const statsSpy = jest.spyOn(wrapper.vm, 'fetchStats')
+      await wrapper.vm.handleBatchPush()
+      await flushPromises()
+      expect(listSpy).toHaveBeenCalled()
+      expect(statsSpy).toHaveBeenCalled()
+    })
+  })
+})
