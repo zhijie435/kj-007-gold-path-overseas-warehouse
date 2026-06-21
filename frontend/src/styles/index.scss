@@ -1,0 +1,36 @@
+@import './variables.scss';
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+#app {
+  height: 100%;
+}
+
+.el-card {
+  border-radius: $card-radius;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity $transition-duration ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.page-container {
+  padding: 20px;
+  background: #f0f2f5;
+  min-height: 100%;
+}

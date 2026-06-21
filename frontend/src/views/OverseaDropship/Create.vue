@@ -785,7 +785,7 @@ export default {
           this.submitLoading = false
           if (response.data && response.data.success) {
             this.$message.success(`代发单【${response.data.data.dropship_no}】已保存为草稿`)
-            this.$router.push({ path: '/oversea-dropship' })
+            this.$router.push({ path: '/dropship/orders' })
           } else {
             this.$message.error(response.data.message || '保存失败')
           }
@@ -807,7 +807,7 @@ export default {
           this.submitLoading = false
           if (response.data && response.data.success) {
             this.$message.success(`代发单【${response.data.data.dropship_no}】创建成功，已提交审核`)
-            this.$router.push({ path: '/oversea-dropship' })
+            this.$router.push({ path: '/dropship/orders' })
           } else {
             this.$message.error(response.data.message || '提交失败')
           }

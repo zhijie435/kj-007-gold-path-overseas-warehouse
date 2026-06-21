@@ -539,7 +539,7 @@ export default {
         data.push({
           id: i + 1,
           dropshipNo: 'DS' + new Date().getFullYear() + String(Math.floor(Math.random() * 1000000)).padStart(6, '0'),
-          externalOrderNo: Math.random() > 0.3 ? 'EXT' + Math.floor(Math.random() * 100000),
+          externalOrderNo: Math.random() > 0.3 ? 'EXT' + Math.floor(Math.random() * 100000) : null,
           sourceChannel: channels[Math.floor(Math.random() * channels.length)],
           warehouseName: warehouses[Math.floor(Math.random() * warehouses.length)],
           receiverName: `${firstName} ${lastName}`,
@@ -630,7 +630,7 @@ export default {
       this.fetchList()
     },
     handleCreate() {
-      this.$router.push({ path: '/oversea-dropship/create' })
+      this.$router.push({ path: '/dropship/orders/create' })
     },
     handleView(row) {
       this.currentDetail = {
