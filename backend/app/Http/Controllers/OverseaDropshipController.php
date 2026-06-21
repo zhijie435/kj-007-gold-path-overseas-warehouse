@@ -1,0 +1,533 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Enums\DropshipOrderStatus;
+use App\Http\Resources\DropshipOrderResource;
+use App\Models\DropshipOrder;
+use App\Models\DropshipOrderItem;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rules\Enum;
+use Symfony\Component\HttpFoundation\Response as HttpResponse;
+
+class OverseaDropshipController extends Controller
+{
+    public function __construct()
+    {
+        $this->middleware('auth:sanctum');
+    }
+
+    public function index(Request $request): AnonymousResourceCollection
+    {
+        $query = DropshipOrder::query()
+            ->with(['items', 'warehouse', 'creator', 'reviewer'])
+            ->when($request->filled('status'), fn ($q) => $q->byStatus($request->string('status')))
+            ->when($request->filled('warehouse_id'), fn ($q) => $q->byWarehouse($request->integer('warehouse_id')))
+            ->when($request->filled('source_channel'), fn ($q) => $q->byChannel($request->string('source_channel')))
+            ->when($request->filled('receiver_country'), fn ($q) => $q->byCountry($request->string('receiver_country')))
+            ->when($request->filled('keyword'), function ($q) use ($request) {
+                $keyword = $request->string('keyword');
+                $q->where(function ($sub) use ($keyword) {
+                    $sub->where('dropship_no', 'like', "%{$keyword}%")
+                        ->orWhere('external_order_no', 'like', "%{$keyword}%")
+                        ->orWhere('wms_order_no', 'like', "%{$keyword}%")
+                        ->orWhere('tracking_no', 'like', "%{$keyword}%")
+                        ->orWhere('receiver_name', 'like', "%{$keyword}%");
+                });
+            })
+            ->when($request->filled('date_range'), function ($q) use ($request) {
+                [$start, $end] = $request->input('date_range');
+                $q->whereBetween('created_at', [$start, $end]);
+            })
+            ->orderByDesc('id');
+
+        $perPage = $request->integer('per_page', 20);
+        $orders = $perPage > 0 ? $query->paginate($perPage) : $query->get();
+
+        return DropshipOrderResource::collection($orders);
+    }
+
+    public function show(DropshipOrder $order): DropshipOrderResource
+    {
+        $order->load(['items', 'warehouse', 'supplier', 'distributor', 'creator', 'reviewer', 'callbackLogs']);
+
+        return new DropshipOrderResource($order);
+    }
+
+    public function store(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'order_id' => ['nullable', 'integer', 'exists:orders,id'],
+            'external_order_no' => ['nullable', 'string', 'max:64'],
+            'warehouse_id' => ['required', 'integer', 'exists:warehouses,id'],
+            'supplier_id' => ['nullable', 'integer', 'exists:suppliers,id'],
+            'distributor_id' => ['nullable', 'integer', 'exists:distributors,id'],
+            'source_channel' => ['required', 'string', 'max:32'],
+            'fulfillment_type' => ['nullable', 'string', 'max:32'],
+            'shipping_method_code' => ['nullable', 'string', 'max:64'],
+            'receiver_name' => ['required', 'string', 'max:128'],
+            'receiver_phone' => ['required', 'string', 'max:64'],
+            'receiver_email' => ['nullable', 'email', 'max:128'],
+            'receiver_country' => ['required', 'string', 'max:8'],
+            'receiver_state' => ['nullable', 'string', 'max:64'],
+            'receiver_city' => ['nullable', 'string', 'max:64'],
+            'receiver_postal_code' => ['nullable', 'string', 'max:32'],
+            'receiver_address' => ['required', 'string', 'max:512'],
+            'currency' => ['nullable', 'string', 'max:8'],
+            'declared_value' => ['nullable', 'numeric', 'min:0'],
+            'remark' => ['nullable', 'string', 'max:1024'],
+            'items' => ['required', 'array', 'min:1'],
+            'items.*.product_id' => ['nullable', 'integer', 'exists:products,id'],
+            'items.*.order_item_id' => ['nullable', 'integer'],
+            'items.*.sku' => ['required', 'string', 'max:64'],
+            'items.*.product_name' => ['required', 'string', 'max:255'],
+            'items.*.specification' => ['nullable', 'string', 'max:255'],
+            'items.*.unit' => ['nullable', 'string', 'max:16'],
+            'items.*.quantity' => ['required', 'integer', 'min:1'],
+            'items.*.unit_price' => ['required', 'numeric', 'min:0'],
+            'items.*.unit_cost' => ['nullable', 'numeric', 'min:0'],
+            'items.*.weight' => ['nullable', 'numeric', 'min:0'],
+            'items.*.hs_code' => ['nullable', 'string', 'max:32'],
+            'items.*.remark' => ['nullable', 'string', 'max:512'],
+        ]);
+
+        return DB::transaction(function () use ($validated, $request) {
+            $itemsData = $validated['items'];
+            unset($validated['items']);
+
+            $order = new DropshipOrder($validated);
+            $order->dropship_no = $order->generateDropshipNo();
+            $order->status = DropshipOrderStatus::DRAFT;
+            $order->created_by = $request->user()?->id;
+            $order->total_items = array_sum(array_column($itemsData, 'quantity'));
+
+            $subtotal = 0;
+            foreach ($itemsData as $item) {
+                $subtotal += ($item['quantity'] * $item['unit_price']);
+            }
+            $order->subtotal = round($subtotal, 2);
+            $order->total_cost = $order->calculateTotalCost();
+            $order->save();
+
+            foreach ($itemsData as $itemData) {
+                $item = new DropshipOrderItem($itemData);
+                $item->subtotal = round(($itemData['quantity'] * $itemData['unit_price']), 2);
+                $order->items()->save($item);
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => new DropshipOrderResource($order->load('items')),
+            ], HttpResponse::HTTP_CREATED);
+        });
+    }
+
+    public function update(Request $request, DropshipOrder $order): JsonResponse
+    {
+        $validated = $request->validate([
+            'warehouse_id' => ['sometimes', 'integer', 'exists:warehouses,id'],
+            'supplier_id' => ['nullable', 'integer', 'exists:suppliers,id'],
+            'distributor_id' => ['nullable', 'integer', 'exists:distributors,id'],
+            'source_channel' => ['sometimes', 'string', 'max:32'],
+            'fulfillment_type' => ['nullable', 'string', 'max:32'],
+            'shipping_method_code' => ['nullable', 'string', 'max:64'],
+            'receiver_name' => ['sometimes', 'string', 'max:128'],
+            'receiver_phone' => ['sometimes', 'string', 'max:64'],
+            'receiver_email' => ['nullable', 'email', 'max:128'],
+            'receiver_country' => ['sometimes', 'string', 'max:8'],
+            'receiver_state' => ['nullable', 'string', 'max:64'],
+            'receiver_city' => ['nullable', 'string', 'max:64'],
+            'receiver_postal_code' => ['nullable', 'string', 'max:32'],
+            'receiver_address' => ['sometimes', 'string', 'max:512'],
+            'currency' => ['nullable', 'string', 'max:8'],
+            'declared_value' => ['nullable', 'numeric', 'min:0'],
+            'remark' => ['nullable', 'string', 'max:1024'],
+        ]);
+
+        if ($order->getStatusEnum()->isTerminal()) {
+            return response()->json([
+                'success' => false,
+                'message' => '订单已处于终态，无法修改',
+            ], HttpResponse::HTTP_BAD_REQUEST);
+        }
+
+        $order->update($validated);
+
+        return response()->json([
+            'success' => true,
+            'data' => new DropshipOrderResource($order->fresh()),
+        ]);
+    }
+
+    public function destroy(DropshipOrder $order): JsonResponse
+    {
+        if (!$order->getStatusEnum()->isTerminal()) {
+            return response()->json([
+                'success' => false,
+                'message' => '订单未处于终态，无法删除',
+            ], HttpResponse::HTTP_BAD_REQUEST);
+        }
+
+        $order->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => '删除成功',
+        ]);
+    }
+
+    public function statistics(Request $request): JsonResponse
+    {
+        $baseQuery = DropshipOrder::query()
+            ->when($request->filled('warehouse_id'), fn ($q) => $q->byWarehouse($request->integer('warehouse_id')))
+            ->when($request->filled('date_range'), function ($q) use ($request) {
+                [$start, $end] = $request->input('date_range');
+                $q->whereBetween('created_at', [$start, $end]);
+            });
+
+        $statusCounts = [];
+        foreach (DropshipOrderStatus::cases() as $status) {
+            $statusCounts[$status->value] = (clone $baseQuery)->byStatus($status)->count();
+        }
+
+        $totalOrders = (clone $baseQuery)->count();
+        $totalCost = (clone $baseQuery)->sum('total_cost');
+        $pendingReview = (clone $baseQuery)->whereIn('status', [
+            DropshipOrderStatus::PENDING_REVIEW->value,
+        ])->count();
+        $pendingPush = (clone $baseQuery)->pendingPush()->count();
+        $inFulfillment = (clone $baseQuery)->inFulfillment()->count();
+        $inTransit = (clone $baseQuery)->inTransit()->count();
+        $completed = (clone $baseQuery)->byStatus(DropshipOrderStatus::COMPLETED)->count();
+        $cancelled = (clone $baseQuery)->byStatus(DropshipOrderStatus::CANCELLED)->count();
+        $exceptions = (clone $baseQuery)->byStatus(DropshipOrderStatus::EXCEPTION)->count();
+
+        $pushFailed = (clone $baseQuery)->byStatus(DropshipOrderStatus::PUSH_FAILED)->count();
+
+        $todayOrders = (clone $baseQuery)->whereDate('created_at', today())->count();
+        $todayShipped = (clone $baseQuery)->whereDate('shipped_at', today())->count();
+        $todayDelivered = (clone $baseQuery)->whereDate('delivered_at', today())->count();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'total_orders' => $totalOrders,
+                'total_cost' => round($totalCost, 2),
+                'status_counts' => $statusCounts,
+                'pending_review' => $pendingReview,
+                'pending_push' => $pendingPush,
+                'in_fulfillment' => $inFulfillment,
+                'in_transit' => $inTransit,
+                'completed' => $completed,
+                'cancelled' => $cancelled,
+                'exceptions' => $exceptions,
+                'push_failed' => $pushFailed,
+                'completion_rate' => $totalOrders > 0 ? round(($completed / $totalOrders) * 100, 2) : 0,
+                'today' => [
+                    'orders' => $todayOrders,
+                    'shipped' => $todayShipped,
+                    'delivered' => $todayDelivered,
+                ],
+            ],
+        ]);
+    }
+
+    public function batchReview(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'ids' => ['required', 'array', 'min:1'],
+            'ids.*' => ['integer', 'exists:dropship_orders,id'],
+            'pass' => ['required', 'boolean'],
+            'remark' => ['nullable', 'string', 'max:1024'],
+        ]);
+
+        $userId = $request->user()?->id;
+        $now = now();
+
+        $targetStatus = $validated['pass']
+            ? DropshipOrderStatus::REVIEW_PASS
+            : DropshipOrderStatus::REVIEW_REJECT;
+
+        $orders = DropshipOrder::query()
+            ->whereIn('id', $validated['ids'])
+            ->whereIn('status', [DropshipOrderStatus::PENDING_REVIEW->value])
+            ->get();
+
+        $successCount = 0;
+        $failedIds = [];
+
+        DB::transaction(function () use ($orders, $targetStatus, $validated, $userId, $now, &$successCount, &$failedIds) {
+            foreach ($orders as $order) {
+                try {
+                    $order->status = $targetStatus;
+                    $order->reviewed_at = $now;
+                    $order->reviewed_by = $userId;
+                    $order->review_remark = $validated['remark'] ?? null;
+                    $order->save();
+                    $successCount++;
+                } catch (\Throwable $e) {
+                    $failedIds[] = $order->id;
+                }
+            }
+        });
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'success_count' => $successCount,
+                'failed_count' => count($failedIds),
+                'failed_ids' => $failedIds,
+            ],
+            'message' => "批量审核完成，成功 {$successCount} 条",
+        ]);
+    }
+
+    public function review(Request $request, DropshipOrder $order): JsonResponse
+    {
+        $validated = $request->validate([
+            'pass' => ['required', 'boolean'],
+            'remark' => ['nullable', 'string', 'max:1024'],
+        ]);
+
+        if ($order->status !== DropshipOrderStatus::PENDING_REVIEW->value) {
+            return response()->json([
+                'success' => false,
+                'message' => '订单状态不是待审核，无法审核',
+            ], HttpResponse::HTTP_BAD_REQUEST);
+        }
+
+        $targetStatus = $validated['pass']
+            ? DropshipOrderStatus::REVIEW_PASS
+            : DropshipOrderStatus::REVIEW_REJECT;
+
+        $order->status = $targetStatus;
+        $order->reviewed_at = now();
+        $order->reviewed_by = $request->user()?->id;
+        $order->review_remark = $validated['remark'] ?? null;
+        $order->save();
+
+        return response()->json([
+            'success' => true,
+            'data' => new DropshipOrderResource($order->fresh()),
+            'message' => $validated['pass'] ? '审核通过' : '审核拒绝',
+        ]);
+    }
+
+    public function push(DropshipOrder $order): JsonResponse
+    {
+        if (!in_array($order->getRawOriginal('status'), [
+            DropshipOrderStatus::REVIEW_PASS->value,
+            DropshipOrderStatus::AUTO_REVIEW_PASS->value,
+            DropshipOrderStatus::PUSH_FAILED->value,
+        ], true)) {
+            return response()->json([
+                'success' => false,
+                'message' => '当前订单状态不允许推单',
+            ], HttpResponse::HTTP_BAD_REQUEST);
+        }
+
+        DB::beginTransaction();
+        try {
+            $order->status = DropshipOrderStatus::PUSHING;
+            $order->push_attempts = ($order->push_attempts ?? 0) + 1;
+            $order->save();
+
+            $wmsOrderNo = 'WMS' . $order->id . time();
+
+            $order->wms_order_no = $wmsOrderNo;
+            $order->status = DropshipOrderStatus::PUSH_SUCCESS;
+            $order->pushed_at = now();
+            $order->push_error = null;
+            $order->save();
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'data' => new DropshipOrderResource($order->fresh()),
+                'message' => '推单成功',
+            ]);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+
+            $order->status = DropshipOrderStatus::PUSH_FAILED;
+            $order->push_error = $e->getMessage();
+            $order->save();
+
+            return response()->json([
+                'success' => false,
+                'message' => '推单失败：' . $e->getMessage(),
+            ], HttpResponse::HTTP_INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    public function batchPush(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'ids' => ['required', 'array', 'min:1'],
+            'ids.*' => ['integer', 'exists:dropship_orders,id'],
+        ]);
+
+        $allowedStatuses = [
+            DropshipOrderStatus::REVIEW_PASS->value,
+            DropshipOrderStatus::AUTO_REVIEW_PASS->value,
+            DropshipOrderStatus::PUSH_FAILED->value,
+        ];
+
+        $orders = DropshipOrder::query()
+            ->whereIn('id', $validated['ids'])
+            ->whereIn('status', $allowedStatuses)
+            ->get();
+
+        $successCount = 0;
+        $failed = [];
+
+        foreach ($orders as $order) {
+            try {
+                DB::transaction(function () use ($order) {
+                    $order->status = DropshipOrderStatus::PUSHING;
+                    $order->push_attempts = ($order->push_attempts ?? 0) + 1;
+                    $order->save();
+
+                    $order->wms_order_no = 'WMS' . $order->id . time();
+                    $order->status = DropshipOrderStatus::PUSH_SUCCESS;
+                    $order->pushed_at = now();
+                    $order->push_error = null;
+                    $order->save();
+                });
+                $successCount++;
+            } catch (\Throwable $e) {
+                $order->status = DropshipOrderStatus::PUSH_FAILED;
+                $order->push_error = $e->getMessage();
+                $order->save();
+                $failed[] = [
+                    'id' => $order->id,
+                    'error' => $e->getMessage(),
+                ];
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'success_count' => $successCount,
+                'failed_count' => count($failed),
+                'failed' => $failed,
+            ],
+            'message' => "批量推单完成，成功 {$successCount} 条",
+        ]);
+    }
+
+    public function updateStatus(Request $request, DropshipOrder $order): JsonResponse
+    {
+        $validated = $request->validate([
+            'status' => ['required', new Enum(DropshipOrderStatus::class)],
+            'remark' => ['nullable', 'string', 'max:1024'],
+        ]);
+
+        $targetStatus = $validated['status'];
+
+        if (!$order->getStatusEnum()->canTransitionTo($targetStatus)) {
+            return response()->json([
+                'success' => false,
+                'message' => "状态变更不允许从 {$order->getStatusEnum()->label()} 变更为 {$targetStatus->label()}",
+            ], HttpResponse::HTTP_BAD_REQUEST);
+        }
+
+        $order->status = $targetStatus;
+
+        $timestampField = $targetStatus->timestampField();
+        if ($timestampField !== null) {
+            $order->{$timestampField} = now();
+        }
+
+        if ($validated['remark'] ?? false) {
+            $order->remark = $validated['remark'];
+        }
+
+        $order->save();
+
+        return response()->json([
+            'success' => true,
+            'data' => new DropshipOrderResource($order->fresh()),
+            'message' => '状态更新成功',
+        ]);
+    }
+
+    public function cancel(Request $request, DropshipOrder $order): JsonResponse
+    {
+        $validated = $request->validate([
+            'reason' => ['nullable', 'string', 'max:1024'],
+        ]);
+
+        if ($order->getStatusEnum()->isTerminal()) {
+            return response()->json([
+                'success' => false,
+                'message' => '订单已处于终态，无法取消',
+            ], HttpResponse::HTTP_BAD_REQUEST);
+        }
+
+        if (!$order->getStatusEnum()->canTransitionTo(DropshipOrderStatus::CANCELLED)) {
+            return response()->json([
+                'success' => false,
+                'message' => '当前状态不允许取消',
+            ], HttpResponse::HTTP_BAD_REQUEST);
+        }
+
+        $order->status = DropshipOrderStatus::CANCELLED;
+        $order->cancelled_at = now();
+        if ($validated['reason'] ?? false) {
+            $order->remark = $validated['reason'];
+        }
+        $order->save();
+
+        return response()->json([
+            'success' => true,
+            'data' => new DropshipOrderResource($order->fresh()),
+            'message' => '订单已取消',
+        ]);
+    }
+
+    public function retryPush(DropshipOrder $order): JsonResponse
+    {
+        if ($order->status !== DropshipOrderStatus::PUSH_FAILED->value) {
+            return response()->json([
+                'success' => false,
+                'message' => '只有推单失败状态才能重试推单',
+            ], HttpResponse::HTTP_BAD_REQUEST);
+        }
+
+        return $this->push($order);
+    }
+
+    public function statusOptions(): JsonResponse
+    {
+        return response()->json([
+            'success' => true,
+            'data' => DropshipOrderStatus::options(),
+        ]);
+    }
+
+    public function channelOptions(): JsonResponse
+    {
+        $channels = [
+            ['value' => 'shopify', 'label' => 'Shopify'],
+            ['value' => 'amazon', 'label' => 'Amazon'],
+            ['value' => 'ebay', 'label' => 'eBay'],
+            ['value' => 'tiktok', 'label' => 'TikTok Shop'],
+            ['value' => 'lazada', 'label' => 'Lazada'],
+            ['value' => 'shopee', 'label' => 'Shopee'],
+            ['value' => 'manual', 'label' => '手动创建'],
+            ['value' => 'api', 'label' => 'API对接'],
+            ['value' => 'other', 'label' => '其他'],
+        ];
+
+        return response()->json([
+            'success' => true,
+            'data' => $channels,
+        ]);
+    }
+}
