@@ -34,3 +34,13 @@ html, body {
   background: #f0f2f5;
   min-height: 100%;
 }
+
+.el-menu--dark .el-submenu.is-active > .el-submenu__title,
+.el-submenu.is-active > .el-submenu__title {
+  color: #ffd04b;
+
+  i,
+  span {
+    color: #ffd04b;
+  }
+}

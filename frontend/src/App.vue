@@ -114,6 +114,14 @@ export default {
   .el-menu {
     border-right: none;
   }
+
+  ::v-deep .el-submenu.is-active > .el-submenu__title {
+    color: #ffd04b;
+
+    i {
+      color: #ffd04b;
+    }
+  }
 }
 
 .app-main {
