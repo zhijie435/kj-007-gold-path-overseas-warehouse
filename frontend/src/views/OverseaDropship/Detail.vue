@@ -371,21 +371,25 @@ export default {
         { status: 'completed', label: '完成' }
       ],
       transitions: {
-        draft: ['pending_review'],
-        pending_review: ['review_pass', 'review_reject'],
-        auto_review_pass: ['pushing'],
-        review_pass: ['pushing'],
-        pushing: ['push_success', 'push_failed'],
-        push_success: ['processing'],
-        processing: ['picked'],
-        picked: ['packed'],
-        packed: ['shipped'],
-        shipped: ['in_transit', 'customs', 'delivered'],
-        in_transit: ['customs', 'delivered'],
-        customs: ['in_transit', 'delivered'],
-        delivered: ['completed'],
-        push_failed: ['pushing'],
-        exception: ['processing', 'pushing']
+        draft: ['pending_review', 'cancelled'],
+        pending_review: ['auto_review_pass', 'review_pass', 'review_reject', 'cancelled'],
+        auto_review_pass: ['pushing', 'cancelled'],
+        review_pass: ['pushing', 'cancelled'],
+        pushing: ['push_success', 'push_failed', 'exception'],
+        push_failed: ['pushing', 'cancelled', 'exception'],
+        push_success: ['processing', 'exception'],
+        processing: ['picked', 'exception', 'cancelled'],
+        picked: ['packed', 'exception'],
+        packed: ['shipped', 'exception'],
+        shipped: ['in_transit', 'customs', 'delivered', 'returned', 'exception'],
+        in_transit: ['customs', 'delivered', 'returned', 'exception'],
+        customs: ['in_transit', 'delivered', 'exception'],
+        delivered: ['completed', 'returned', 'exception'],
+        completed: [],
+        cancelled: [],
+        returned: [],
+        review_reject: [],
+        exception: ['processing', 'cancelled', 'pushing']
       },
       detail: {
         id: 1,
@@ -627,16 +631,16 @@ export default {
       return map[this.detail.status] || 0
     },
     canReview() {
-      return this.detail.status === 'pending_review'
+      return this.canTransitionTo('review_pass') || this.canTransitionTo('review_reject')
     },
     canPush() {
-      return ['review_pass', 'auto_review_pass', 'push_failed'].includes(this.detail.status)
+      return this.canTransitionTo('pushing')
     },
     canRetry() {
-      return ['push_failed', 'exception'].includes(this.detail.status)
+      return this.canTransitionTo('pushing') && ['push_failed', 'exception'].includes(this.detail.status)
     },
     canCancel() {
-      return !['completed', 'cancelled', 'returned', 'review_reject', 'shipped', 'in_transit', 'customs', 'delivered'].includes(this.detail.status)
+      return this.canTransitionTo('cancelled')
     },
     canUpdateStatus() {
       return ['push_success', 'processing', 'picked', 'packed', 'shipped', 'in_transit', 'customs', 'delivered'].includes(this.detail.status)
@@ -786,26 +790,58 @@ export default {
         cancelButtonText: '取消',
         type: 'warning'
       }).then(() => {
+        if (!this.canTransitionTo('pushing')) {
+          this.$message.warning('当前状态不允许推送')
+          return
+        }
         this.pushLoading = true
+        this.detail.status = 'pushing'
+        this.operationLogs.unshift({
+          action: '开始推单到WMS',
+          operator: '系统',
+          time: this.getNow(),
+          level: 'primary',
+          tag: 'Pushing'
+        })
         setTimeout(() => {
-          this.detail.status = 'push_success'
-          this.detail.pushedAt = this.getNow()
-          this.detail.wmsOrderNo = 'WMS-' + Math.floor(Math.random() * 1000000)
-          this.operationLogs.unshift({
-            action: '推单成功',
-            operator: '系统',
-            time: this.getNow(),
-            level: 'success',
-            color: '#67C23A',
-            tag: 'Pushed',
-            remark: 'WMS单号：' + this.detail.wmsOrderNo
-          })
-          this.pushLoading = false
-          this.$message.success('推送成功')
+          const pushSuccess = Math.random() > 0.15
+          if (pushSuccess) {
+            this.detail.status = 'push_success'
+            this.detail.pushedAt = this.getNow()
+            this.detail.wmsOrderNo = 'WMS-' + Math.floor(Math.random() * 1000000)
+            this.operationLogs.unshift({
+              action: '推单成功',
+              operator: '系统',
+              time: this.getNow(),
+              level: 'success',
+              color: '#67C23A',
+              tag: 'Pushed',
+              remark: 'WMS单号：' + this.detail.wmsOrderNo
+            })
+            this.pushLoading = false
+            this.$message.success('推送成功')
+          } else {
+            this.detail.status = 'push_failed'
+            this.operationLogs.unshift({
+              action: '推单失败',
+              operator: '系统',
+              time: this.getNow(),
+              level: 'danger',
+              color: '#F56C6C',
+              tag: 'PushFailed',
+              remark: 'WMS连接超时，请稍后重试'
+            })
+            this.pushLoading = false
+            this.$message.error('推送失败，请重试')
+          }
         }, 1000)
       }).catch(() => {})
     },
     handleStatusCommand(status) {
+      if (!this.canTransitionTo(status)) {
+        this.$message.warning(`当前状态不允许切换到【${this.getStatusLabel(status)}】`)
+        return
+      }
       this.$confirm(`确定将状态更新为【${this.getStatusLabel(status)}】吗？`, '状态更新', {
         confirmButtonText: '确定',
         cancelButtonText: '取消',
@@ -838,8 +874,34 @@ export default {
         cancelButtonText: '取消',
         type: 'info'
       }).then(() => {
+        if (!this.canTransitionTo('pushing')) {
+          this.$message.warning('当前状态不允许重试')
+          return
+        }
+        const oldStatus = this.detail.status
         this.detail.status = 'pushing'
+        this.operationLogs.unshift({
+          action: '开始重试推单',
+          operator: '当前用户',
+          time: this.getNow(),
+          level: 'primary',
+          tag: 'Retrying',
+          remark: `从 ${this.getStatusLabel(oldStatus)} 重试`
+        })
         setTimeout(() => {
+          if (!this.canTransitionTo('push_success')) {
+            this.detail.status = 'push_failed'
+            this.operationLogs.unshift({
+              action: '重试推单失败',
+              operator: '系统',
+              time: this.getNow(),
+              level: 'danger',
+              color: '#F56C6C',
+              tag: 'RetryFailed'
+            })
+            this.$message.error('重试失败')
+            return
+          }
           this.detail.status = 'push_success'
           this.operationLogs.unshift({
             action: '重试推单成功',
@@ -854,6 +916,10 @@ export default {
       }).catch(() => {})
     },
     handleCancel() {
+      if (!this.canTransitionTo('cancelled')) {
+        this.$message.warning('当前状态不允许取消')
+        return
+      }
       this.$prompt('请填写取消原因：', '取消订单', {
         confirmButtonText: '确定取消',
         cancelButtonText: '返回',

@@ -592,13 +592,34 @@ export default {
       return colorMap[status] || 'info'
     },
     canReview(status) {
-      return status === 'pending_review'
+      return status === 'pending_review' || status === 'draft'
     },
     canPush(status) {
       return ['review_pass', 'auto_review_pass', 'push_failed'].includes(status)
     },
     canCancel(status) {
-      return !['completed', 'cancelled', 'returned', 'review_reject', 'shipped', 'in_transit', 'customs', 'delivered'].includes(status)
+      const transitions = {
+        draft: ['cancelled'],
+        pending_review: ['cancelled'],
+        auto_review_pass: ['cancelled'],
+        review_pass: ['cancelled'],
+        pushing: [],
+        push_failed: ['cancelled'],
+        push_success: [],
+        processing: ['cancelled'],
+        picked: [],
+        packed: [],
+        shipped: [],
+        in_transit: [],
+        customs: [],
+        delivered: [],
+        completed: [],
+        cancelled: [],
+        returned: [],
+        review_reject: [],
+        exception: ['cancelled']
+      }
+      return (transitions[status] || []).includes('cancelled')
     },
     canRetry(status) {
       return ['push_failed', 'exception'].includes(status)
@@ -675,10 +696,13 @@ export default {
       }
       this.reviewLoading = true
       setTimeout(() => {
+        const row = this.tableData.find(item => item.id === this.currentReviewId)
+        if (row) {
+          row.status = this.reviewForm.result === 'pass' ? 'review_pass' : 'review_reject'
+        }
         this.$message.success('审核成功')
         this.reviewDialogVisible = false
         this.reviewLoading = false
-        this.fetchList()
         this.fetchStats()
       }, 500)
     },
@@ -688,9 +712,12 @@ export default {
         cancelButtonText: '取消',
         type: 'warning'
       }).then(() => {
-        this.$message.success('推送成功')
-        this.fetchList()
-        this.fetchStats()
+        row.status = 'pushing'
+        setTimeout(() => {
+          row.status = 'push_success'
+          this.$message.success('推送成功')
+          this.fetchStats()
+        }, 800)
       }).catch(() => {})
     },
     handleCancel(row) {
@@ -699,8 +726,9 @@ export default {
         cancelButtonText: '取消',
         type: 'warning'
       }).then(() => {
+        row.status = 'cancelled'
         this.$message.success('取消成功')
-        this.fetchList()
+        this.fetchStats()
       }).catch(() => {})
     },
     handleRetry(row) {
@@ -709,8 +737,12 @@ export default {
         cancelButtonText: '取消',
         type: 'warning'
       }).then(() => {
-        this.$message.success('重试成功')
-        this.fetchList()
+        row.status = 'pushing'
+        setTimeout(() => {
+          row.status = 'push_success'
+          this.$message.success('重试成功')
+          this.fetchStats()
+        }, 800)
       }).catch(() => {})
     },
     handleBatchReview() {
@@ -719,8 +751,12 @@ export default {
         cancelButtonText: '取消',
         type: 'warning'
       }).then(() => {
+        this.tableData.forEach(row => {
+          if (this.selectedIds.includes(row.id) && (row.status === 'pending_review' || row.status === 'draft')) {
+            row.status = 'review_pass'
+          }
+        })
         this.$message.success('批量审核成功')
-        this.fetchList()
         this.fetchStats()
       }).catch(() => {})
     },
@@ -730,8 +766,12 @@ export default {
         cancelButtonText: '取消',
         type: 'warning'
       }).then(() => {
+        this.tableData.forEach(row => {
+          if (this.selectedIds.includes(row.id) && ['review_pass', 'auto_review_pass', 'push_failed'].includes(row.status)) {
+            row.status = 'push_success'
+          }
+        })
         this.$message.success('批量推送成功')
-        this.fetchList()
         this.fetchStats()
       }).catch(() => {})
     }
