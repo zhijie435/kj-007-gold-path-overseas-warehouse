@@ -945,8 +945,15 @@ export default {
   .status-steps-card {
     margin-bottom: 16px;
 
+    ::v-deep .el-card__body {
+      overflow-x: auto;
+      overflow-y: hidden;
+    }
+
     .progress-steps {
       padding: 8px 0;
+      min-width: 900px;
+      white-space: nowrap;
     }
   }
 
@@ -965,10 +972,10 @@ export default {
         font-size: 16px;
         color: #409EFF;
 
-        &.receiver { color: '#67C23A'; }
-        &.shipping { color: '#E6A23C'; }
-        &.operation { color: '#909399'; }
-        &.tracking { color: '#F56C6C'; }
+        &.receiver { color: #67C23A; }
+        &.shipping { color: #E6A23C; }
+        &.operation { color: #909399; }
+        &.tracking { color: #F56C6C; }
       }
 
       .header-right-info {
@@ -1115,7 +1122,7 @@ export default {
         font-size: 16px;
 
         &.operation { color: #909399; }
-        &.tracking { color: #F56C6C'; }
+        &.tracking { color: #F56C6C; }
       }
 
       .header-right-info {

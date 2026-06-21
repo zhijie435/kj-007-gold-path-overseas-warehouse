@@ -1,7 +1,7 @@
 <template>
   <div class="oversea-dropship-list">
     <el-row :gutter="16" class="stat-cards">
-      <el-col :xs="12" :sm="8" :md="4">
+      <el-col :xs="12" :sm="8" :md="8" :lg="4">
         <el-card shadow="hover" class="stat-card">
           <div class="stat-content">
             <div class="stat-icon pending-review">
@@ -14,7 +14,7 @@
           </div>
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="4">
+      <el-col :xs="12" :sm="8" :md="8" :lg="4">
         <el-card shadow="hover" class="stat-card">
           <div class="stat-content">
             <div class="stat-icon pending-push">
@@ -27,7 +27,7 @@
           </div>
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="4">
+      <el-col :xs="12" :sm="8" :md="8" :lg="4">
         <el-card shadow="hover" class="stat-card">
           <div class="stat-content">
             <div class="stat-icon in-transit">
@@ -40,7 +40,7 @@
           </div>
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="4">
+      <el-col :xs="12" :sm="8" :md="8" :lg="4">
         <el-card shadow="hover" class="stat-card">
           <div class="stat-content">
             <div class="stat-icon exception">
@@ -53,7 +53,7 @@
           </div>
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="4">
+      <el-col :xs="12" :sm="8" :md="8" :lg="4">
         <el-card shadow="hover" class="stat-card">
           <div class="stat-content">
             <div class="stat-icon today-new">
@@ -66,7 +66,7 @@
           </div>
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="4">
+      <el-col :xs="12" :sm="8" :md="8" :lg="4">
         <el-card shadow="hover" class="stat-card">
           <div class="stat-content">
             <div class="stat-icon complete-rate">
