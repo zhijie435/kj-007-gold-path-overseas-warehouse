@@ -353,6 +353,16 @@
 </template>
 
 <script>
+import {
+  getDropshipOrder,
+  reviewDropshipOrder,
+  pushDropshipOrder,
+  retryPushDropshipOrder,
+  cancelDropshipOrder,
+  updateDropshipOrderStatus,
+  syncDropshipTracking
+} from '@/api/dropship'
+
 export default {
   name: 'OverseaDropshipDetail',
   data() {
@@ -392,223 +402,55 @@ export default {
         exception: ['processing', 'cancelled', 'pushing']
       },
       detail: {
-        id: 1,
-        dropshipNo: 'DS202606201430250001',
-        orderNo: 'SO2026062000123',
-        externalOrderNo: 'EXT-SHOPIFY-78923',
-        wmsOrderNo: 'WMS-LAX-120568',
-        sourceChannel: 'Shopify',
-        fulfillmentType: '一件代发',
-        status: 'in_transit',
-        creator: 'admin',
-        reviewer: 'admin',
-        createdAt: '2026-06-16 14:30:25',
-        reviewedAt: '2026-06-16 15:10:00',
-        pushedAt: '2026-06-16 18:00:00',
-        shippedAt: '2026-06-17 10:00:00',
-        deliveredAt: null,
-        completedAt: null,
-        cancelledAt: null,
-        receiverName: 'Emma Johnson',
-        receiverPhone: '+1-555-234-5678',
-        receiverEmail: 'emma.j@example.com',
-        receiverCountry: 'US',
-        receiverState: 'CA',
-        receiverCity: 'Los Angeles',
-        receiverPostalCode: '90001',
-        receiverAddress: '123 Main Street, Apt 4B, Beverly Hills',
-        warehouseId: 1,
-        warehouseName: '美国洛杉矶仓',
-        warehouseCode: 'US-LAX-01',
-        shippingMethod: 'USPS Priority Mail',
-        shippingMethodCode: 'usps_priority',
-        trackingNo: '9405511899560123456789',
-        carrierName: 'USPS',
+        id: null,
+        dropshipNo: '',
+        orderNo: '',
+        externalOrderNo: '',
+        wmsOrderNo: '',
+        sourceChannel: '',
+        fulfillmentType: '',
+        status: 'draft',
+        creator: '',
+        reviewer: '',
+        createdAt: '',
+        reviewedAt: '',
+        pushedAt: '',
+        shippedAt: '',
+        deliveredAt: '',
+        completedAt: '',
+        cancelledAt: '',
+        receiverName: '',
+        receiverPhone: '',
+        receiverEmail: '',
+        receiverCountry: '',
+        receiverState: '',
+        receiverCity: '',
+        receiverPostalCode: '',
+        receiverAddress: '',
+        warehouseId: null,
+        warehouseName: '',
+        warehouseCode: '',
+        shippingMethod: '',
+        shippingMethodCode: '',
+        trackingNo: '',
+        carrierName: '',
         currency: 'USD',
-        subtotal: 119.97,
-        shippingFee: 12.50,
-        handlingFee: 5.00,
-        insuranceFee: 2.40,
-        dutyFee: 0.00,
-        totalCost: 139.87,
-        declaredValue: 119.97,
-        weight: 0.650,
-        volumeWeight: 0.800,
-        pushAttempts: 1,
+        subtotal: 0,
+        shippingFee: 0,
+        handlingFee: 0,
+        insuranceFee: 0,
+        dutyFee: 0,
+        totalCost: 0,
+        declaredValue: 0,
+        weight: 0,
+        volumeWeight: 0,
+        pushAttempts: 0,
         reviewRemark: '',
-        remark: '客户要求周末送达，优先处理',
-        items: [
-          {
-            sku: 'BT-EARP-PRO-BLK',
-            name: '蓝牙耳机 Pro 2代 主动降噪',
-            spec: '黑色 / 标准版',
-            quantity: 2,
-            price: 49.99,
-            subtotal: 99.98,
-            weight: 0.300,
-            hsCode: '8517620000',
-            batchNo: 'B20260515'
-          },
-          {
-            sku: 'ACC-CASE-IP15-CLR',
-            name: '透明手机保护壳',
-            spec: '透明 / iPhone 15 Pro',
-            quantity: 1,
-            price: 19.99,
-            subtotal: 19.99,
-            weight: 0.050,
-            hsCode: '3926909090',
-            batchNo: 'B20260601'
-          }
-        ]
+        remark: '',
+        items: []
       },
-      operationLogs: [
-        {
-          action: '物流轨迹更新',
-          operator: '系统',
-          time: '2026-06-20 14:30:25',
-          level: 'info',
-          remark: '已签收，包裹由收件人本人签收'
-        },
-        {
-          action: '状态更新：已签收',
-          operator: '系统',
-          time: '2026-06-20 14:30:00',
-          level: 'success',
-          color: '#67C23A',
-          tag: 'Delivered'
-        },
-        {
-          action: '物流轨迹更新',
-          operator: '系统',
-          time: '2026-06-20 09:15:30',
-          level: 'info',
-          remark: '快递员正在派送中'
-        },
-        {
-          action: '物流轨迹更新',
-          operator: '系统',
-          time: '2026-06-19 22:00:00',
-          level: 'info',
-          remark: '包裹已到达当地配送站'
-        },
-        {
-          action: '状态更新：运输中',
-          operator: '系统',
-          time: '2026-06-18 16:00:00',
-          level: 'warning',
-          color: '#E6A23C',
-          tag: 'In Transit'
-        },
-        {
-          action: '状态更新：已发货',
-          operator: 'WMS系统',
-          time: '2026-06-17 10:00:00',
-          level: 'success',
-          color: '#67C23A',
-          tag: 'Shipped',
-          remark: '运单号：9405511899560123456789'
-        },
-        {
-          action: 'WMS回调：已打包',
-          operator: 'WMS系统',
-          time: '2026-06-17 08:30:00',
-          level: 'primary',
-          tag: 'Packed'
-        },
-        {
-          action: 'WMS回调：已拣货',
-          operator: 'WMS系统',
-          time: '2026-06-17 06:00:00',
-          level: 'primary',
-          tag: 'Picked'
-        },
-        {
-          action: '推单成功',
-          operator: '系统',
-          time: '2026-06-16 18:00:00',
-          level: 'success',
-          color: '#67C23A',
-          tag: 'Pushed',
-          remark: 'WMS单号：WMS-LAX-120568'
-        },
-        {
-          action: '开始推单到WMS',
-          operator: '系统',
-          time: '2026-06-16 17:59:50',
-          level: 'primary',
-          tag: 'Pushing'
-        },
-        {
-          action: '审核通过',
-          operator: 'admin',
-          time: '2026-06-16 15:10:00',
-          level: 'success',
-          color: '#67C23A',
-          tag: 'Reviewed',
-          remark: '信息完整，通过审核'
-        },
-        {
-          action: '提交待审核',
-          operator: 'admin',
-          time: '2026-06-16 14:35:00',
-          level: 'warning',
-          color: '#E6A23C',
-          tag: 'Pending'
-        },
-        {
-          action: '创建代发单',
-          operator: 'admin',
-          time: '2026-06-16 14:30:25',
-          level: 'info',
-          tag: 'Created',
-          remark: '来源：Shopify订单同步'
-        }
-      ],
-      trackingLogs: [
-        {
-          status: '已签收 Delivered',
-          location: 'Los Angeles, CA 90001, US',
-          description: 'Your item was delivered at the front door or porch',
-          time: '2026-06-20 14:30:25'
-        },
-        {
-          status: '派送中 Out for Delivery',
-          location: 'Los Angeles, CA 90001, US',
-          description: 'Your item is out for delivery today',
-          time: '2026-06-20 09:15:30'
-        },
-        {
-          status: '到达目的地 Arrived at Destination',
-          location: 'Los Angeles Processing Center, CA, US',
-          description: 'Your package has arrived at the destination processing facility',
-          time: '2026-06-19 22:00:00'
-        },
-        {
-          status: '运输中 In Transit',
-          location: 'Phoenix Distribution Hub, AZ, US',
-          description: 'Your package is traveling to the destination',
-          time: '2026-06-18 16:00:00'
-        },
-        {
-          status: '离开发件地 Departed Origin',
-          location: 'Los Angeles International Hub, CA, US',
-          description: 'Your package has left the origin facility',
-          time: '2026-06-17 18:30:00'
-        },
-        {
-          status: '已发货 Shipped',
-          location: 'US-LAX-01 美国洛杉矶仓',
-          description: 'The shipment has been dispatched from the overseas warehouse',
-          time: '2026-06-17 10:00:00'
-        },
-        {
-          status: '包裹揽收 Accepted',
-          location: 'USPS Pickup Point - Los Angeles, CA',
-          description: 'USPS has accepted the package',
-          time: '2026-06-17 11:45:00'
-        }
-      ]
+      operationLogs: [],
+      trackingLogs: []
     }
   },
   computed: {
@@ -652,8 +494,94 @@ export default {
       }
     }
   },
-  created() {},
+  created() {
+    this.loadOrder()
+  },
   methods: {
+    async loadOrder() {
+      const id = this.$route.params.id
+      if (!id) return
+      try {
+        const res = await getDropshipOrder(id)
+        const data = res.data
+        const d = data.data || data
+        this.detail = {
+          id: d.id,
+          dropshipNo: d.dropship_no || d.dropshipNo || '',
+          orderNo: d.order_id || '',
+          externalOrderNo: d.external_order_no || d.externalOrderNo || '',
+          wmsOrderNo: d.wms_order_no || d.wmsOrderNo || '',
+          sourceChannel: d.source_channel || d.sourceChannel || '',
+          fulfillmentType: d.fulfillment_type || '',
+          status: d.status || 'draft',
+          creator: d.creator?.name || d.created_by || '',
+          reviewer: d.reviewer?.name || d.reviewed_by || '',
+          createdAt: d.created_at || d.createdAt || '',
+          reviewedAt: d.reviewed_at || d.reviewedAt || '',
+          pushedAt: d.pushed_at || d.pushedAt || '',
+          shippedAt: d.shipped_at || d.shippedAt || '',
+          deliveredAt: d.delivered_at || d.deliveredAt || '',
+          completedAt: d.completed_at || d.completedAt || '',
+          cancelledAt: d.cancelled_at || d.cancelledAt || '',
+          receiverName: d.receiver_name || d.receiverName || '',
+          receiverPhone: d.receiver_phone || d.receiverPhone || '',
+          receiverEmail: d.receiver_email || d.receiverEmail || '',
+          receiverCountry: d.receiver_country || d.receiverCountry || '',
+          receiverState: d.receiver_state || d.receiverState || '',
+          receiverCity: d.receiver_city || d.receiverCity || '',
+          receiverPostalCode: d.receiver_postal_code || d.receiverPostalCode || '',
+          receiverAddress: d.receiver_address || d.receiverAddress || '',
+          warehouseId: d.warehouse_id || d.warehouseId,
+          warehouseName: d.warehouse?.name || d.warehouseName || '',
+          warehouseCode: d.warehouse?.code || d.warehouseCode || '',
+          shippingMethod: d.shipping_method_code || d.shippingMethod || '',
+          shippingMethodCode: d.shipping_method_code || d.shippingMethodCode || '',
+          trackingNo: d.tracking_no || d.trackingNo || '',
+          carrierName: d.carrier_name || d.carrierName || '',
+          currency: d.currency || 'USD',
+          subtotal: parseFloat(d.subtotal) || 0,
+          shippingFee: parseFloat(d.shipping_fee) || 0,
+          handlingFee: parseFloat(d.handling_fee) || 0,
+          insuranceFee: parseFloat(d.insurance_fee) || 0,
+          dutyFee: parseFloat(d.duty_fee) || 0,
+          totalCost: parseFloat(d.total_cost) || 0,
+          declaredValue: parseFloat(d.declared_value) || 0,
+          weight: parseFloat(d.weight) || 0,
+          volumeWeight: parseFloat(d.volume_weight) || 0,
+          pushAttempts: d.push_attempts || 0,
+          reviewRemark: d.review_remark || '',
+          remark: d.remark || '',
+          items: (d.items || []).map(item => ({
+            sku: item.sku || '',
+            name: item.product_name || item.name || '',
+            spec: item.specification || item.spec || '',
+            quantity: parseInt(item.quantity) || 0,
+            price: parseFloat(item.unit_price || item.price) || 0,
+            subtotal: parseFloat(item.subtotal) || 0,
+            weight: parseFloat(item.weight) || 0,
+            hsCode: item.hs_code || item.hsCode || '',
+            batchNo: item.batch_no || item.batchNo || ''
+          }))
+        }
+        this.operationLogs = (d.callback_logs || []).map(log => ({
+          action: log.callback_type || log.action || '',
+          operator: log.source || '系统',
+          time: log.created_at || log.time || '',
+          level: 'info',
+          color: '#409EFF',
+          remark: log.request_body || ''
+        }))
+        this.trackingLogs = (d.tracking_events || []).map(ev => ({
+          status: ev.status || '',
+          location: ev.location || '',
+          description: ev.description || '',
+          time: ev.occurred_at || ev.time || ''
+        }))
+      } catch (e) {
+        this.$message.error('加载订单详情失败')
+        console.error(e)
+      }
+    },
     getStepStatus(index) {
       if (index < this.currentStepIndex - 1) return 'success'
       if (index === this.currentStepIndex - 1) return 'process'
@@ -751,10 +679,24 @@ export default {
         spinner: 'el-icon-loading',
         background: 'rgba(0, 0, 0, 0.5)'
       })
-      setTimeout(() => {
+      syncDropshipTracking(this.detail.id).then(res => {
+        const data = res.data
+        if (data.success !== false) {
+          const events = (data.data || {}).tracking_events || []
+          this.trackingLogs = events.map(ev => ({
+            status: ev.status || '',
+            location: ev.location || '',
+            description: ev.description || '',
+            time: ev.occurred_at || ev.time || ''
+          }))
+          this.$message.success('物流轨迹已更新，共获取到 ' + this.trackingLogs.length + ' 条记录')
+        }
+      }).catch(e => {
+        console.error(e)
+        this.$message.error('刷新物流轨迹失败')
+      }).finally(() => {
         loading.close()
-        this.$message.success('物流轨迹已更新，共获取到 ' + this.trackingLogs.length + ' 条记录')
-      }, 1200)
+      })
     },
     handleBack() {
       this.$router.back()
@@ -764,24 +706,17 @@ export default {
         confirmButtonText: '通过',
         cancelButtonText: '取消',
         type: 'success'
-      }).then(() => {
+      }).then(async () => {
         this.reviewLoading = true
-        setTimeout(() => {
-          this.detail.status = 'review_pass'
-          this.detail.reviewedAt = this.getNow()
-          this.detail.reviewer = '当前用户'
-          this.operationLogs.unshift({
-            action: '审核通过',
-            operator: '当前用户',
-            time: this.getNow(),
-            level: 'success',
-            color: '#67C23A',
-            tag: 'Reviewed',
-            remark: '手动操作：审核通过'
-          })
-          this.reviewLoading = false
+        try {
+          await reviewDropshipOrder(this.detail.id, { pass: true })
           this.$message.success('审核成功')
-        }, 500)
+          this.loadOrder()
+        } catch (e) {
+          console.error(e)
+        } finally {
+          this.reviewLoading = false
+        }
       }).catch(() => {})
     },
     handlePush() {
@@ -789,52 +724,21 @@ export default {
         confirmButtonText: '推送',
         cancelButtonText: '取消',
         type: 'warning'
-      }).then(() => {
+      }).then(async () => {
         if (!this.canTransitionTo('pushing')) {
           this.$message.warning('当前状态不允许推送')
           return
         }
         this.pushLoading = true
-        this.detail.status = 'pushing'
-        this.operationLogs.unshift({
-          action: '开始推单到WMS',
-          operator: '系统',
-          time: this.getNow(),
-          level: 'primary',
-          tag: 'Pushing'
-        })
-        setTimeout(() => {
-          const pushSuccess = Math.random() > 0.15
-          if (pushSuccess) {
-            this.detail.status = 'push_success'
-            this.detail.pushedAt = this.getNow()
-            this.detail.wmsOrderNo = 'WMS-' + Math.floor(Math.random() * 1000000)
-            this.operationLogs.unshift({
-              action: '推单成功',
-              operator: '系统',
-              time: this.getNow(),
-              level: 'success',
-              color: '#67C23A',
-              tag: 'Pushed',
-              remark: 'WMS单号：' + this.detail.wmsOrderNo
-            })
-            this.pushLoading = false
-            this.$message.success('推送成功')
-          } else {
-            this.detail.status = 'push_failed'
-            this.operationLogs.unshift({
-              action: '推单失败',
-              operator: '系统',
-              time: this.getNow(),
-              level: 'danger',
-              color: '#F56C6C',
-              tag: 'PushFailed',
-              remark: 'WMS连接超时，请稍后重试'
-            })
-            this.pushLoading = false
-            this.$message.error('推送失败，请重试')
-          }
-        }, 1000)
+        try {
+          await pushDropshipOrder(this.detail.id)
+          this.$message.success('推送成功')
+          this.loadOrder()
+        } catch (e) {
+          console.error(e)
+        } finally {
+          this.pushLoading = false
+        }
       }).catch(() => {})
     },
     handleStatusCommand(status) {
@@ -846,26 +750,14 @@ export default {
         confirmButtonText: '确定',
         cancelButtonText: '取消',
         type: 'warning'
-      }).then(() => {
-        this.detail.status = status
-        if (status === 'shipped') {
-          this.detail.shippedAt = this.getNow()
-          this.detail.trackingNo = 'TRK' + Math.floor(Math.random() * 10000000000)
+      }).then(async () => {
+        try {
+          await updateDropshipOrderStatus(this.detail.id, { status })
+          this.$message.success('状态已更新')
+          this.loadOrder()
+        } catch (e) {
+          console.error(e)
         }
-        if (status === 'delivered') {
-          this.detail.deliveredAt = this.getNow()
-        }
-        if (status === 'completed') {
-          this.detail.completedAt = this.getNow()
-        }
-        this.operationLogs.unshift({
-          action: `手动更新状态：${this.getStatusLabel(status)}`,
-          operator: '当前用户',
-          time: this.getNow(),
-          level: 'primary',
-          tag: 'Manual'
-        })
-        this.$message.success('状态已更新')
       }).catch(() => {})
     },
     handleRetry() {
@@ -873,46 +765,18 @@ export default {
         confirmButtonText: '重试',
         cancelButtonText: '取消',
         type: 'info'
-      }).then(() => {
+      }).then(async () => {
         if (!this.canTransitionTo('pushing')) {
           this.$message.warning('当前状态不允许重试')
           return
         }
-        const oldStatus = this.detail.status
-        this.detail.status = 'pushing'
-        this.operationLogs.unshift({
-          action: '开始重试推单',
-          operator: '当前用户',
-          time: this.getNow(),
-          level: 'primary',
-          tag: 'Retrying',
-          remark: `从 ${this.getStatusLabel(oldStatus)} 重试`
-        })
-        setTimeout(() => {
-          if (!this.canTransitionTo('push_success')) {
-            this.detail.status = 'push_failed'
-            this.operationLogs.unshift({
-              action: '重试推单失败',
-              operator: '系统',
-              time: this.getNow(),
-              level: 'danger',
-              color: '#F56C6C',
-              tag: 'RetryFailed'
-            })
-            this.$message.error('重试失败')
-            return
-          }
-          this.detail.status = 'push_success'
-          this.operationLogs.unshift({
-            action: '重试推单成功',
-            operator: '系统',
-            time: this.getNow(),
-            level: 'success',
-            color: '#67C23A',
-            tag: 'Retried'
-          })
+        try {
+          await retryPushDropshipOrder(this.detail.id)
           this.$message.success('重试成功')
-        }, 1000)
+          this.loadOrder()
+        } catch (e) {
+          console.error(e)
+        }
       }).catch(() => {})
     },
     handleCancel() {
@@ -929,24 +793,15 @@ export default {
         type: 'error',
         inputType: 'textarea',
         inputValidator: (value) => !!value && value.trim().length >= 2
-      }).then(({ value }) => {
-        this.detail.status = 'cancelled'
-        this.detail.cancelledAt = this.getNow()
-        this.operationLogs.unshift({
-          action: '订单已取消',
-          operator: '当前用户',
-          time: this.getNow(),
-          level: 'danger',
-          color: '#F56C6C',
-          tag: 'Cancelled',
-          remark: value
-        })
-        this.$message.success('订单已取消')
+      }).then(async ({ value }) => {
+        try {
+          await cancelDropshipOrder(this.detail.id, { reason: value })
+          this.$message.success('订单已取消')
+          this.loadOrder()
+        } catch (e) {
+          console.error(e)
+        }
       }).catch(() => {})
-    },
-    getNow() {
-      const d = new Date()
-      return d.toISOString().replace('T', ' ').substring(0, 19)
     }
   }
 }

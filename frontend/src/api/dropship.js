@@ -113,3 +113,10 @@ export function cancelDropshipOrder(id, data) {
     data
   })
 }
+
+export function syncDropshipTracking(id) {
+  return request({
+    url: `/dropship/orders/${id}/sync-tracking`,
+    method: 'post'
+  })
+}

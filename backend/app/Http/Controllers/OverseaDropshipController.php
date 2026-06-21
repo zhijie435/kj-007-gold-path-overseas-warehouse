@@ -467,6 +467,27 @@ class OverseaDropshipController extends Controller
         return $this->push($order);
     }
 
+    public function syncTracking(DropshipOrder $order): JsonResponse
+    {
+        try {
+            $wmsService = app(\App\Services\WmsIntegrationService::class);
+            $trackingEvents = $wmsService->fetchTracking($order);
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'tracking_events' => $trackingEvents,
+                ],
+                'message' => '物流轨迹同步成功',
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => '物流轨迹同步失败：' . $e->getMessage(),
+            ], HttpResponse::HTTP_INTERNAL_SERVER_ERROR);
+        }
+    }
+
     public function statusOptions(): JsonResponse
     {
         return response()->json([

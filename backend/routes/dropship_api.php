@@ -35,6 +35,8 @@ Route::middleware('auth:sanctum')->group(function () {
             ->name('orders.update-status');
         Route::post('/orders/{order}/cancel', [OverseaDropshipController::class, 'cancel'])
             ->name('orders.cancel');
+        Route::post('/orders/{order}/sync-tracking', [OverseaDropshipController::class, 'syncTracking'])
+            ->name('orders.sync-tracking');
 
         Route::apiResource('orders', OverseaDropshipController::class)
             ->parameters(['orders' => 'order'])

@@ -416,6 +416,19 @@
 </template>
 
 <script>
+import {
+  getDropshipOrders,
+  getDropshipStatistics,
+  getDropshipStatusOptions,
+  getDropshipChannelOptions,
+  reviewDropshipOrder,
+  batchReviewDropshipOrders,
+  pushDropshipOrder,
+  batchPushDropshipOrders,
+  retryPushDropshipOrder,
+  cancelDropshipOrder
+} from '@/api/dropship'
+
 export default {
   name: 'OverseaDropshipList',
   data() {
@@ -453,39 +466,9 @@ export default {
         result: 'pass',
         remark: ''
       },
-      statusOptions: [
-        { value: 'draft', label: '草稿' },
-        { value: 'pending_review', label: '待审核' },
-        { value: 'auto_review_pass', label: '自动审核通过' },
-        { value: 'review_pass', label: '审核通过' },
-        { value: 'review_reject', label: '审核拒绝' },
-        { value: 'pushing', label: '推单中' },
-        { value: 'push_success', label: '推单成功' },
-        { value: 'push_failed', label: '推单失败' },
-        { value: 'processing', label: '处理中' },
-        { value: 'picked', label: '已拣货' },
-        { value: 'packed', label: '已打包' },
-        { value: 'shipped', label: '已发货' },
-        { value: 'in_transit', label: '运输中' },
-        { value: 'customs', label: '清关中' },
-        { value: 'delivered', label: '已签收' },
-        { value: 'completed', label: '已完成' },
-        { value: 'cancelled', label: '已取消' },
-        { value: 'returned', label: '已退回' },
-        { value: 'exception', label: '异常' }
-      ],
-      warehouseOptions: [
-        { id: 1, name: '美国洛杉矶仓' },
-        { id: 2, name: '英国伦敦仓' },
-        { id: 3, name: '德国法兰克福仓' },
-        { id: 4, name: '日本东京仓' }
-      ],
-      channelOptions: [
-        { value: 'shopify', label: 'Shopify' },
-        { value: 'amazon', label: 'Amazon' },
-        { value: 'ebay', label: 'eBay' },
-        { value: 'manual', label: '手动录入' }
-      ],
+      statusOptions: [],
+      warehouseOptions: [],
+      channelOptions: [],
       countryOptions: [
         { code: 'US', name: '美国' },
         { code: 'GB', name: '英国' },
@@ -499,68 +482,79 @@ export default {
   },
   computed: {},
   created() {
+    this.fetchOptions()
     this.fetchList()
     this.fetchStats()
   },
   methods: {
-    fetchList() {
+    async fetchOptions() {
+      try {
+        const [statusRes, channelRes] = await Promise.all([
+          getDropshipStatusOptions(),
+          getDropshipChannelOptions()
+        ])
+        if (statusRes.data?.success) {
+          this.statusOptions = statusRes.data.data || []
+        }
+        if (channelRes.data?.success) {
+          this.channelOptions = channelRes.data.data || []
+        }
+      } catch (e) {
+        console.error(e)
+      }
+    },
+    async fetchList() {
       this.loading = true
-      setTimeout(() => {
-        this.tableData = this.generateMockData()
-        this.total = 86
+      try {
+        const params = {
+          page: this.pagination.currentPage,
+          per_page: this.pagination.pageSize
+        }
+        if (this.filterForm.keyword) params.keyword = this.filterForm.keyword
+        if (this.filterForm.status.length > 0) params.status = this.filterForm.status.join(',')
+        if (this.filterForm.warehouseId) params.warehouse_id = this.filterForm.warehouseId
+        if (this.filterForm.channel) params.source_channel = this.filterForm.channel
+        if (this.filterForm.country) params.receiver_country = this.filterForm.country
+        if (this.filterForm.dateRange && this.filterForm.dateRange.length === 2) {
+          params.date_range = this.filterForm.dateRange
+        }
+        const res = await getDropshipOrders(params)
+        const data = res.data
+        if (data.success !== false) {
+          const list = data.data || data
+          if (Array.isArray(list)) {
+            this.tableData = list
+            this.total = data.total || list.length
+          } else if (list.data) {
+            this.tableData = list.data
+            this.total = list.total || list.data.length
+          }
+        }
+      } catch (e) {
+        console.error(e)
+      } finally {
         this.loading = false
-      }, 500)
-    },
-    fetchStats() {
-      this.stats = {
-        pendingReview: 23,
-        pendingPush: 15,
-        inTransit: 48,
-        exception: 5,
-        todayNew: 18,
-        completeRate: 86.5
       }
     },
-    generateMockData() {
-      const statuses = [
-        'pending_review', 'review_pass', 'push_success', 'processing',
-        'shipped', 'in_transit', 'delivered', 'completed', 'exception'
-      ]
-      const channels = ['Shopify', 'Amazon', 'eBay', '手动录入']
-      const warehouses = ['美国洛杉矶仓', '英国伦敦仓', '德国法兰克福仓', '日本东京仓']
-      const countries = ['US', 'GB', 'DE', 'JP', 'CA']
-      const firstNames = ['John', 'Emma', 'Michael', 'Sophia', 'James', 'Olivia']
-      const lastNames = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones']
-      const data = []
-      for (let i = 0; i < this.pagination.pageSize; i++) {
-        const firstName = firstNames[Math.floor(Math.random() * firstNames.length)]
-        const lastName = lastNames[Math.floor(Math.random() * lastNames.length)]
-        const status = statuses[Math.floor(Math.random() * statuses.length)]
-        data.push({
-          id: i + 1,
-          dropshipNo: 'DS' + new Date().getFullYear() + String(Math.floor(Math.random() * 1000000)).padStart(6, '0'),
-          externalOrderNo: Math.random() > 0.3 ? 'EXT' + Math.floor(Math.random() * 100000) : null,
-          sourceChannel: channels[Math.floor(Math.random() * channels.length)],
-          warehouseName: warehouses[Math.floor(Math.random() * warehouses.length)],
-          receiverName: `${firstName} ${lastName}`,
-          receiverPhone: '+1' + Math.floor(1000000000 + Math.random() * 900000000),
-          receiverCountry: countries[Math.floor(Math.random() * countries.length)],
-          totalItems: Math.floor(Math.random() * 5) + 1,
-          currency: 'USD',
-          totalCost: (Math.random() * 500 + 20).toFixed(2),
-          status: status,
-          trackingNo: ['shipped', 'in_transit', 'delivered', 'completed'].includes(status)
-            ? 'TRK' + Math.floor(Math.random() * 10000000000)
-            : null,
-          createdAt: this.randomDate()
-        })
+    async fetchStats() {
+      try {
+        const res = await getDropshipStatistics()
+        const data = res.data
+        if (data.success !== false) {
+          const d = data.data || data
+          this.stats = {
+            pendingReview: d.pending_review || 0,
+            pendingPush: d.pending_push || 0,
+            inTransit: d.in_transit || 0,
+            exception: d.exceptions || 0,
+            todayNew: d.today?.orders || 0,
+            completeRate: d.completion_rate || 0
+          }
+          this.warehouseOptions = (d.warehouses || []).map(w => ({ id: w.warehouse_id, name: w.warehouse_name }))
+        }
+      } catch (e) {
+        console.error(e)
       }
-      return data
-    },
-    randomDate() {
-      const start = new Date()
-      start.setDate(start.getDate() - Math.floor(Math.random() * 30))
-      return start.toISOString().replace('T', ' ').substring(0, 19)
     },
     getStatusLabel(status) {
       const map = {}
@@ -654,95 +648,82 @@ export default {
       this.$router.push({ path: '/dropship/orders/create' })
     },
     handleView(row) {
-      this.currentDetail = {
-        ...row,
-        receiverEmail: 'test@example.com',
-        receiverState: 'CA',
-        receiverCity: 'Los Angeles',
-        receiverPostalCode: '90001',
-        receiverAddress: '123 Main Street, Apt 4B',
-        shippingMethodCode: 'USPS Priority',
-        items: [
-          { sku: 'SKU001', name: '蓝牙耳机 Pro', spec: '黑色/标准版', quantity: 2, price: 49.99, subtotal: 99.98, weight: 0.3, hsCode: '85176200' },
-          { sku: 'SKU002', name: '手机壳', spec: '透明/iPhone 15', quantity: 1, price: 19.99, subtotal: 19.99, weight: 0.05, hsCode: '39269000' }
-        ],
-        trackingHistory: [
-          { status: '已签收', location: 'Los Angeles, US', description: '包裹已送达收件人', time: '2026-06-20 14:30:00' },
-          { status: '派送中', location: 'Los Angeles, US', description: '快递员正在派送', time: '2026-06-20 09:15:00' },
-          { status: '到达目的地', location: 'Los Angeles, US', description: '包裹已到达当地配送站', time: '2026-06-19 22:00:00' },
-          { status: '运输中', location: 'Chicago, US', description: '包裹转运中', time: '2026-06-18 16:00:00' },
-          { status: '已发货', location: 'New York, US', description: '包裹已从海外仓发出', time: '2026-06-17 10:00:00' }
-        ],
-        operationLogs: [
-          { action: '订单签收', operator: '系统', time: '2026-06-20 14:30:00', color: '#67C23A' },
-          { action: '物流轨迹更新', operator: '系统', time: '2026-06-19 22:00:00' },
-          { action: 'WMS推送发货', operator: '系统', time: '2026-06-17 10:00:00', color: '#67C23A' },
-          { action: '推单成功', operator: '系统', time: '2026-06-16 18:00:00', color: '#67C23A' },
-          { action: '审核通过', operator: 'admin', time: '2026-06-16 15:30:00', color: '#67C23A' },
-          { action: '创建代发单', operator: 'admin', time: '2026-06-16 14:00:00' }
-        ]
-      }
-      this.detailDialogVisible = true
+      this.$router.push({ path: `/dropship/orders/${row.id || row.dropship_id}` })
     },
     handleReview(row) {
       this.currentReviewId = row.id
       this.reviewForm = { result: 'pass', remark: '' }
       this.reviewDialogVisible = true
     },
-    submitReview() {
+    async submitReview() {
       if (this.reviewForm.result === 'reject' && !this.reviewForm.remark.trim()) {
         this.$message.warning('请填写拒绝原因')
         return
       }
       this.reviewLoading = true
-      setTimeout(() => {
-        const row = this.tableData.find(item => item.id === this.currentReviewId)
-        if (row) {
-          row.status = this.reviewForm.result === 'pass' ? 'review_pass' : 'review_reject'
-        }
+      try {
+        await reviewDropshipOrder(this.currentReviewId, {
+          pass: this.reviewForm.result === 'pass',
+          remark: this.reviewForm.remark
+        })
         this.$message.success('审核成功')
         this.reviewDialogVisible = false
-        this.reviewLoading = false
+        this.fetchList()
         this.fetchStats()
-      }, 500)
+      } catch (e) {
+        console.error(e)
+      } finally {
+        this.reviewLoading = false
+      }
     },
     handlePush(row) {
-      this.$confirm(`确定要推送代发单【${row.dropshipNo}】吗？`, '提示', {
+      this.$confirm(`确定要推送代发单【${row.dropshipNo || row.dropship_no}】吗？`, '提示', {
         confirmButtonText: '确定',
         cancelButtonText: '取消',
         type: 'warning'
-      }).then(() => {
-        row.status = 'pushing'
-        setTimeout(() => {
-          row.status = 'push_success'
+      }).then(async () => {
+        try {
+          await pushDropshipOrder(row.id)
           this.$message.success('推送成功')
+          this.fetchList()
           this.fetchStats()
-        }, 800)
+        } catch (e) {
+          console.error(e)
+        }
       }).catch(() => {})
     },
     handleCancel(row) {
-      this.$confirm(`确定要取消代发单【${row.dropshipNo}】吗？`, '提示', {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
-        type: 'warning'
-      }).then(() => {
-        row.status = 'cancelled'
-        this.$message.success('取消成功')
-        this.fetchStats()
+      this.$prompt('请填写取消原因：', `取消代发单【${row.dropshipNo || row.dropship_no}】`, {
+        confirmButtonText: '确定取消',
+        cancelButtonText: '返回',
+        inputPlaceholder: '请填写取消原因',
+        inputPattern: /.+/,
+        inputErrorMessage: '取消原因不能为空'
+      }).then(async ({ value }) => {
+        try {
+          await cancelDropshipOrder(row.id, { reason: value })
+          this.$message.success('取消成功')
+          this.fetchList()
+          this.fetchStats()
+        } catch (e) {
+          console.error(e)
+        }
       }).catch(() => {})
     },
     handleRetry(row) {
-      this.$confirm(`确定要重试代发单【${row.dropshipNo}】吗？`, '提示', {
+      this.$confirm(`确定要重试代发单【${row.dropshipNo || row.dropship_no}】吗？`, '提示', {
         confirmButtonText: '确定',
         cancelButtonText: '取消',
         type: 'warning'
-      }).then(() => {
-        row.status = 'pushing'
-        setTimeout(() => {
-          row.status = 'push_success'
+      }).then(async () => {
+        try {
+          await retryPushDropshipOrder(row.id)
           this.$message.success('重试成功')
+          this.fetchList()
           this.fetchStats()
-        }, 800)
+        } catch (e) {
+          console.error(e)
+        }
       }).catch(() => {})
     },
     handleBatchReview() {
@@ -750,14 +731,18 @@ export default {
         confirmButtonText: '通过审核',
         cancelButtonText: '取消',
         type: 'warning'
-      }).then(() => {
-        this.tableData.forEach(row => {
-          if (this.selectedIds.includes(row.id) && (row.status === 'pending_review' || row.status === 'draft')) {
-            row.status = 'review_pass'
-          }
-        })
-        this.$message.success('批量审核成功')
-        this.fetchStats()
+      }).then(async () => {
+        try {
+          await batchReviewDropshipOrders({
+            ids: this.selectedIds,
+            pass: true
+          })
+          this.$message.success('批量审核成功')
+          this.fetchList()
+          this.fetchStats()
+        } catch (e) {
+          console.error(e)
+        }
       }).catch(() => {})
     },
     handleBatchPush() {
@@ -765,14 +750,15 @@ export default {
         confirmButtonText: '确定推送',
         cancelButtonText: '取消',
         type: 'warning'
-      }).then(() => {
-        this.tableData.forEach(row => {
-          if (this.selectedIds.includes(row.id) && ['review_pass', 'auto_review_pass', 'push_failed'].includes(row.status)) {
-            row.status = 'push_success'
-          }
-        })
-        this.$message.success('批量推送成功')
-        this.fetchStats()
+      }).then(async () => {
+        try {
+          await batchPushDropshipOrders({ ids: this.selectedIds })
+          this.$message.success('批量推送成功')
+          this.fetchList()
+          this.fetchStats()
+        } catch (e) {
+          console.error(e)
+        }
       }).catch(() => {})
     }
   }

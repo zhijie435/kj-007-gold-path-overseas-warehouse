@@ -479,6 +479,18 @@
 </template>
 
 <script>
+import {
+  getAutomationRules,
+  getAutomationRule,
+  createAutomationRule,
+  updateAutomationRule,
+  deleteAutomationRule,
+  toggleAutomationRuleEnabled,
+  triggerAutomationRule,
+  getAutomationRuleTypeOptions,
+  getAutomationStatistics
+} from '@/api/automationRule'
+
 export default {
   name: 'AutomationRuleList',
   data() {
@@ -489,10 +501,11 @@ export default {
       formDialogVisible: false,
       isViewMode: false,
       isEditMode: false,
+      editingId: null,
       stats: {
-        totalTriggered: 12856,
-        successRate: 98.6,
-        todayTriggered: 342
+        totalTriggered: 0,
+        successRate: 0,
+        todayTriggered: 0
       },
       pagination: {
         currentPage: 1,
@@ -546,7 +559,9 @@ export default {
     }
   },
   created() {
+    this.fetchTypeOptions()
     this.fetchList()
+    this.fetchStats()
   },
   methods: {
     createEmptyForm() {
@@ -576,154 +591,60 @@ export default {
         stopChain: false
       }
     },
-    fetchList() {
+    async fetchTypeOptions() {
+      try {
+        const res = await getAutomationRuleTypeOptions()
+        const data = res.data
+        if (data.success !== false && data.data) {
+          this.groupedRuleTypes = data.data
+        }
+      } catch (e) {
+        console.error(e)
+      }
+    },
+    async fetchList() {
       this.loading = true
-      setTimeout(() => {
-        this.tableData = [
-          {
-            id: 1,
-            name: '美国订单自动审核',
-            code: 'AUTO_REVIEW_US_001',
-            type: 'auto_review',
-            category: '订单处理',
-            priority: 200,
-            warehouseName: '美国洛杉矶仓',
-            countryCode: 'US',
-            sourceChannel: null,
-            minAmount: null,
-            maxAmount: 500,
-            activeTimeStart: null,
-            activeTimeEnd: null,
-            weekdays: [],
-            isEnabled: true,
-            triggerCount: 3420,
-            successCount: 3386,
-            lastTriggeredAt: '2026-06-21 09:45:23'
-          },
-          {
-            id: 2,
-            name: '自动分配物流-欧洲',
-            code: 'AUTO_SHIP_EU_001',
-            type: 'auto_assign_shipping',
-            category: '订单处理',
-            priority: 180,
-            warehouseName: null,
-            countryCode: 'DE',
-            sourceChannel: null,
-            minAmount: null,
-            maxAmount: null,
-            activeTimeStart: null,
-            activeTimeEnd: null,
-            weekdays: [],
-            isEnabled: true,
-            triggerCount: 1856,
-            successCount: 1832,
-            lastTriggeredAt: '2026-06-21 09:30:10'
-          },
-          {
-            id: 3,
-            name: '自动推单WMS',
-            code: 'AUTO_PUSH_WMS_001',
-            type: 'auto_push_wms',
-            category: 'WMS集成',
-            priority: 150,
-            warehouseName: null,
-            countryCode: null,
-            sourceChannel: null,
-            minAmount: null,
-            maxAmount: null,
-            activeTimeStart: '08:00',
-            activeTimeEnd: '22:00',
-            weekdays: [1, 2, 3, 4, 5],
-            isEnabled: true,
-            triggerCount: 4102,
-            successCount: 4085,
-            lastTriggeredAt: '2026-06-21 09:15:45'
-          },
-          {
-            id: 4,
-            name: '大额订单人工审核',
-            code: 'HIGH_AMOUNT_REVIEW_001',
-            type: 'auto_notification',
-            category: '消息通知',
-            priority: 250,
-            warehouseName: null,
-            countryCode: null,
-            sourceChannel: null,
-            minAmount: 1000,
-            maxAmount: null,
-            activeTimeStart: null,
-            activeTimeEnd: null,
-            weekdays: [],
-            isEnabled: true,
-            triggerCount: 234,
-            successCount: 234,
-            lastTriggeredAt: '2026-06-20 18:22:33'
-          },
-          {
-            id: 5,
-            name: '超时未推单自动取消',
-            code: 'AUTO_CANCEL_TIMEOUT_001',
-            type: 'auto_cancel_order',
-            category: '异常处理',
-            priority: 90,
-            warehouseName: null,
-            countryCode: null,
-            sourceChannel: null,
-            minAmount: null,
-            maxAmount: null,
-            activeTimeStart: '02:00',
-            activeTimeEnd: '04:00',
-            weekdays: [1, 2, 3, 4, 5, 6, 7],
-            isEnabled: false,
-            triggerCount: 58,
-            successCount: 55,
-            lastTriggeredAt: '2026-06-20 03:15:00'
-          },
-          {
-            id: 6,
-            name: '日本仓自动分仓',
-            code: 'AUTO_WH_JP_001',
-            type: 'auto_assign_warehouse',
-            category: '订单处理',
-            priority: 190,
-            warehouseName: '日本东京仓',
-            countryCode: 'JP',
-            sourceChannel: 'amazon',
-            minAmount: null,
-            maxAmount: null,
-            activeTimeStart: null,
-            activeTimeEnd: null,
-            weekdays: [],
-            isEnabled: true,
-            triggerCount: 876,
-            successCount: 870,
-            lastTriggeredAt: '2026-06-21 08:50:12'
-          },
-          {
-            id: 7,
-            name: '物流轨迹定时同步',
-            code: 'AUTO_SYNC_TRACK_001',
-            type: 'auto_sync_tracking',
-            category: 'WMS集成',
-            priority: 120,
-            warehouseName: null,
-            countryCode: null,
-            sourceChannel: null,
-            minAmount: null,
-            maxAmount: null,
-            activeTimeStart: null,
-            activeTimeEnd: null,
-            weekdays: [],
-            isEnabled: true,
-            triggerCount: 2310,
-            successCount: 2280,
-            lastTriggeredAt: '2026-06-21 09:00:00'
+      try {
+        const params = {
+          page: this.pagination.currentPage,
+          per_page: this.pagination.pageSize
+        }
+        if (this.activeTab !== 'all') {
+          params.category = this.activeTab
+        }
+        const res = await getAutomationRules(params)
+        const data = res.data
+        if (data.success !== false) {
+          const list = data.data || data
+          if (Array.isArray(list)) {
+            this.tableData = list
+            this.total = data.total || list.length
+          } else if (list.data) {
+            this.tableData = list.data
+            this.total = list.total || list.data.length
           }
-        ]
-        this.total = this.tableData.length
+        }
+      } catch (e) {
+        console.error(e)
+      } finally {
         this.loading = false
-      }, 500)
+      }
+    },
+    async fetchStats() {
+      try {
+        const res = await getAutomationStatistics()
+        const data = res.data
+        if (data.success !== false) {
+          const d = data.data || data
+          this.stats = {
+            totalTriggered: d.total_triggered || d.totalTriggered || 0,
+            successRate: d.success_rate || d.successRate || 0,
+            todayTriggered: d.today_triggered || d.todayTriggered || 0
+          }
+        }
+      } catch (e) {
+        console.error(e)
+      }
     },
     getRuleTypeLabel(type) {
       for (const category in this.groupedRuleTypes) {
@@ -748,6 +669,7 @@ export default {
     },
     handleTabChange() {
       this.pagination.currentPage = 1
+      this.fetchList()
     },
     handleSizeChange(size) {
       this.pagination.pageSize = size
@@ -760,6 +682,7 @@ export default {
     handleAdd() {
       this.isViewMode = false
       this.isEditMode = false
+      this.editingId = null
       this.formData = this.createEmptyForm()
       this.formData.code = 'RULE_' + Date.now().toString().slice(-8)
       this.$nextTick(() => {
@@ -767,85 +690,82 @@ export default {
       })
       this.formDialogVisible = true
     },
-    handleView(row) {
+    async handleView(row) {
       this.isViewMode = true
       this.isEditMode = false
-      this.formData = {
-        name: row.name,
-        code: row.code,
-        type: row.type,
-        description: '该规则用于自动化处理相关订单流程',
-        priority: row.priority,
-        conditionLogic: 'AND',
-        conditions: [
-          {
-            logic: 'AND',
-            rules: [
-              { field: 'country', operator: 'eq', value: row.countryCode || '任意' }
-            ]
-          }
-        ],
-        actions: ['示例动作'],
-        warehouseId: row.warehouseName ? 1 : null,
-        countryCode: row.countryCode,
-        sourceChannel: row.sourceChannel,
-        minAmount: row.minAmount,
-        maxAmount: row.maxAmount,
-        activeTimeStart: row.activeTimeStart,
-        activeTimeEnd: row.activeTimeEnd,
-        weekdays: row.weekdays || [],
-        isEnabled: row.isEnabled,
-        stopChain: false
+      try {
+        const res = await getAutomationRule(row.id)
+        const data = res.data
+        const d = data.data || data
+        this.formData = this.mapRuleToForm(d)
+      } catch (e) {
+        this.formData = this.mapRuleToForm(row)
+        console.error(e)
       }
       this.$nextTick(() => {
         this.$refs.ruleForm && this.$refs.ruleForm.clearValidate()
       })
       this.formDialogVisible = true
     },
-    handleEdit(row) {
+    async handleEdit(row) {
       this.isViewMode = false
       this.isEditMode = true
-      this.formData = {
-        name: row.name,
-        code: row.code,
-        type: row.type,
-        description: '该规则用于自动化处理相关订单流程',
-        priority: row.priority,
-        conditionLogic: 'AND',
-        conditions: [
-          {
-            logic: 'AND',
-            rules: [
-              { field: 'country', operator: 'eq', value: row.countryCode || '' },
-              { field: 'amount', operator: 'lte', value: row.maxAmount || '' }
-            ]
-          }
-        ],
-        actions: [],
-        warehouseId: row.warehouseName ? 1 : null,
-        countryCode: row.countryCode,
-        sourceChannel: row.sourceChannel,
-        minAmount: row.minAmount,
-        maxAmount: row.maxAmount,
-        activeTimeStart: row.activeTimeStart,
-        activeTimeEnd: row.activeTimeEnd,
-        weekdays: row.weekdays || [],
-        isEnabled: row.isEnabled,
-        stopChain: false
+      this.editingId = row.id
+      try {
+        const res = await getAutomationRule(row.id)
+        const data = res.data
+        const d = data.data || data
+        this.formData = this.mapRuleToForm(d)
+      } catch (e) {
+        this.formData = this.mapRuleToForm(row)
+        console.error(e)
       }
       this.$nextTick(() => {
         this.$refs.ruleForm && this.$refs.ruleForm.clearValidate()
       })
       this.formDialogVisible = true
+    },
+    mapRuleToForm(d) {
+      return {
+        name: d.name || '',
+        code: d.code || '',
+        type: d.type || '',
+        description: d.description || '',
+        priority: d.priority || 100,
+        conditionLogic: d.conditions?.logic || 'AND',
+        conditions: (d.conditions?.groups && d.conditions.groups.length > 0)
+          ? d.conditions.groups
+          : [{ logic: 'AND', rules: [{ field: '', operator: '', value: '' }] }],
+        actions: d.actions || [],
+        warehouseId: d.warehouse_id || d.warehouseId || null,
+        countryCode: d.country_code || d.countryCode || null,
+        sourceChannel: d.source_channel || d.sourceChannel || null,
+        minAmount: d.min_amount || d.minAmount || null,
+        maxAmount: d.max_amount || d.maxAmount || null,
+        activeTimeStart: d.active_time_start || d.activeTimeStart || null,
+        activeTimeEnd: d.active_time_end || d.activeTimeEnd || null,
+        weekdays: d.weekdays || [],
+        isEnabled: d.is_enabled !== undefined ? d.is_enabled : (d.isEnabled !== undefined ? d.isEnabled : true),
+        stopChain: d.stop_chain || d.stopChain || false
+      }
     },
     handleCopy(row) {
       this.$confirm(`确定要复制规则【${row.name}】吗？`, '复制规则', {
         confirmButtonText: '确定',
         cancelButtonText: '取消',
         type: 'info'
-      }).then(() => {
-        this.$message.success('规则复制成功')
-        this.fetchList()
+      }).then(async () => {
+        try {
+          const form = this.mapRuleToForm(row)
+          form.name = form.name + ' (副本)'
+          form.code = 'RULE_' + Date.now().toString().slice(-8)
+          await createAutomationRule(form)
+          this.$message.success('规则复制成功')
+          this.fetchList()
+          this.fetchStats()
+        } catch (e) {
+          console.error(e)
+        }
       }).catch(() => {})
     },
     handleTrigger(row) {
@@ -853,18 +773,29 @@ export default {
         confirmButtonText: '执行',
         cancelButtonText: '取消',
         type: 'warning'
-      }).then(() => {
+      }).then(async () => {
         const loading = this.$loading({
           lock: true,
           text: '正在执行规则...',
           spinner: 'el-icon-loading',
           background: 'rgba(0, 0, 0, 0.7)'
         })
-        setTimeout(() => {
+        try {
+          const res = await triggerAutomationRule(row.id)
+          const data = res.data
           loading.close()
-          this.$message.success('规则执行完成，共匹配 42 个订单，成功处理 41 个')
+          if (data.success !== false) {
+            const d = data.data || {}
+            this.$message.success(`规则执行完成，共匹配 ${d.matched_count || 0} 个订单，成功处理 ${d.success_count || 0} 个`)
+          } else {
+            this.$message.error(data.message || '规则执行失败')
+          }
           this.fetchList()
-        }, 1500)
+          this.fetchStats()
+        } catch (e) {
+          loading.close()
+          console.error(e)
+        }
       }).catch(() => {})
     },
     handleDelete(row) {
@@ -872,14 +803,27 @@ export default {
         confirmButtonText: '删除',
         cancelButtonText: '取消',
         type: 'error'
-      }).then(() => {
-        this.tableData = this.tableData.filter(item => item.id !== row.id)
-        this.total = this.tableData.length
-        this.$message.success('删除成功')
+      }).then(async () => {
+        try {
+          await deleteAutomationRule(row.id)
+          this.$message.success('删除成功')
+          this.fetchList()
+          this.fetchStats()
+        } catch (e) {
+          console.error(e)
+        }
       }).catch(() => {})
     },
-    handleToggleStatus(row) {
-      this.$message.success(row.isEnabled ? `规则【${row.name}】已启用` : `规则【${row.name}】已禁用`)
+    async handleToggleStatus(row) {
+      try {
+        await toggleAutomationRuleEnabled(row.id)
+        this.$message.success(row.isEnabled ? `规则【${row.name}】已启用` : `规则【${row.name}】已禁用`)
+        this.fetchList()
+        this.fetchStats()
+      } catch (e) {
+        row.isEnabled = !row.isEnabled
+        console.error(e)
+      }
     },
     addConditionGroup() {
       this.formData.conditions.push({
@@ -899,15 +843,46 @@ export default {
       this.formData.conditions[groupIndex].rules.splice(conditionIndex, 1)
     },
     handleSubmit() {
-      this.$refs.ruleForm.validate((valid) => {
+      this.$refs.ruleForm.validate(async (valid) => {
         if (!valid) return
         this.submitLoading = true
-        setTimeout(() => {
+        try {
+          const payload = {
+            name: this.formData.name,
+            code: this.formData.code,
+            type: this.formData.type,
+            description: this.formData.description,
+            priority: this.formData.priority,
+            conditions: {
+              logic: this.formData.conditionLogic,
+              groups: this.formData.conditions
+            },
+            actions: this.formData.actions,
+            warehouse_id: this.formData.warehouseId,
+            country_code: this.formData.countryCode,
+            source_channel: this.formData.sourceChannel,
+            min_amount: this.formData.minAmount,
+            max_amount: this.formData.maxAmount,
+            active_time_start: this.formData.activeTimeStart,
+            active_time_end: this.formData.activeTimeEnd,
+            weekdays: this.formData.weekdays,
+            is_enabled: this.formData.isEnabled,
+            stop_chain: this.formData.stopChain
+          }
+          if (this.isEditMode && this.editingId) {
+            await updateAutomationRule(this.editingId, payload)
+          } else {
+            await createAutomationRule(payload)
+          }
           this.$message.success(this.isEditMode ? '规则编辑成功' : '规则创建成功')
           this.formDialogVisible = false
-          this.submitLoading = false
           this.fetchList()
-        }, 600)
+          this.fetchStats()
+        } catch (e) {
+          console.error(e)
+        } finally {
+          this.submitLoading = false
+        }
       })
     }
   }
