@@ -694,9 +694,11 @@ describe('OverseaDropship/Create.vue - Golden Path: Full Interaction Flows', () 
         mocks: {
           $router: mockRouter,
           $message: mockMessage,
-          $confirm: jest.fn(() => Promise.resolve()),
-          $refs: { receiverForm: { validate: mockValidate } }
+          $confirm: jest.fn(() => Promise.resolve())
         }
+      })
+      Object.defineProperty(wrapper.vm, '$refs', {
+        value: { receiverForm: { validate: mockValidate } }
       })
       wrapper.setData({ activeStep: 0 })
       wrapper.vm.nextStep(0)
@@ -715,9 +717,11 @@ describe('OverseaDropship/Create.vue - Golden Path: Full Interaction Flows', () 
         mocks: {
           $router: { back: jest.fn(), push: jest.fn() },
           $message: mockMessage,
-          $confirm: jest.fn(() => Promise.resolve()),
-          $refs: { receiverForm: { validate: mockValidate } }
+          $confirm: jest.fn(() => Promise.resolve())
         }
+      })
+      Object.defineProperty(wrapper.vm, '$refs', {
+        value: { receiverForm: { validate: mockValidate } }
       })
       wrapper.setData({ activeStep: 0 })
       wrapper.vm.nextStep(0)

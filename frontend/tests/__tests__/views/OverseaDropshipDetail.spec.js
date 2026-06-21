@@ -629,6 +629,7 @@ describe('OverseaDropship/Detail.vue - Golden Path: Full Interaction Flows', () 
     it('sets reviewLoading=true during API call and resets after', async () => {
       jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
       const p = wrapper.vm.handleReviewPass()
+      await Promise.resolve()
       expect(wrapper.vm.reviewLoading).toBe(true)
       await p
       await flushPromises()
@@ -670,6 +671,7 @@ describe('OverseaDropship/Detail.vue - Golden Path: Full Interaction Flows', () 
     it('sets pushLoading=true during call, resets after', async () => {
       jest.spyOn(wrapper.vm, '$confirm').mockResolvedValue()
       const p = wrapper.vm.handlePush()
+      await Promise.resolve()
       expect(wrapper.vm.pushLoading).toBe(true)
       await p
       await flushPromises()

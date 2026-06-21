@@ -425,21 +425,29 @@ describe('OverseaDropship/List.vue - Golden Path: Full Interaction Flows', () =>
     })
 
     it('includes warehouse_id, source_channel, receiver_country filters', async () => {
+      jest.clearAllMocks()
       wrapper.setData({ filterForm: { keyword: '', status: [], warehouseId: 3, channel: 'shopify', country: 'JP', dateRange: [] } })
       await wrapper.vm.fetchList()
       await flushPromises()
-      const callArgs = api.getDropshipOrders.mock.calls[0][0]
-      expect(callArgs.warehouse_id).toBe(3)
-      expect(callArgs.source_channel).toBe('shopify')
-      expect(callArgs.receiver_country).toBe('JP')
+      expect(api.getDropshipOrders).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          warehouse_id: 3,
+          source_channel: 'shopify',
+          receiver_country: 'JP'
+        })
+      )
     })
 
     it('includes date_range when both start and end present', async () => {
+      jest.clearAllMocks()
       wrapper.setData({ filterForm: { keyword: '', status: [], warehouseId: null, channel: null, country: null, dateRange: ['2026-01-01', '2026-06-21'] } })
       await wrapper.vm.fetchList()
       await flushPromises()
-      const callArgs = api.getDropshipOrders.mock.calls[0][0]
-      expect(callArgs.date_range).toEqual(['2026-01-01', '2026-06-21'])
+      expect(api.getDropshipOrders).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          date_range: ['2026-01-01', '2026-06-21']
+        })
+      )
     })
 
     it('maps response data to tableData and total', async () => {
