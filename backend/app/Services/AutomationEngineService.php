@@ -408,6 +408,9 @@ class AutomationEngineService
         $service = app(OverseaDropshipService::class);
         $service->reviewOrder($order, true, $params['remark'] ?? '系统自动审核通过', null);
 
+        $order->refresh();
+        $this->executeRulesForOrder($order, 'review_passed');
+
         return true;
     }
 

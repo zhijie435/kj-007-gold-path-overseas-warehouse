@@ -27,7 +27,6 @@ class OverseaDropshipService
             $order->created_by = $user->id;
             $order->status = DropshipOrderStatus::DRAFT;
             $order->total_items = array_sum(array_column($items, 'quantity'));
-            $order->total_cost = $order->calculateTotalCost();
 
             if (empty($order->warehouse_id) && !empty($order->receiver_country)) {
                 $warehouse = $this->assignWarehouseByCountry($order->receiver_country);
@@ -38,6 +37,7 @@ class OverseaDropshipService
 
             $order->save();
 
+            $itemsSubtotal = 0;
             foreach ($items as $itemData) {
                 $item = new DropshipOrderItem();
                 $item->fill($itemData);
@@ -46,7 +46,12 @@ class OverseaDropshipService
                     $item->subtotal = $item->calculateSubtotal();
                 }
                 $item->save();
+                $itemsSubtotal += (float) $item->subtotal;
             }
+
+            $order->subtotal = round($itemsSubtotal, 2);
+            $order->total_cost = $order->calculateTotalCost();
+            $order->save();
 
             return $order->load('items');
         });

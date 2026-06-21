@@ -106,10 +106,23 @@ class OverseaDropshipController extends Controller
             $automationService->executeRulesForOrder($order, 'order_created');
 
             if ($submitNow) {
-                $order = $service->updateDropshipStatus($order, DropshipOrderStatus::PENDING_REVIEW, [
-                    'source' => 'auto_submit',
-                ]);
-                $automationService->executeRulesForOrder($order, 'order_submitted');
+                $order->refresh();
+                $currentStatus = $order->getStatusEnum();
+                if ($currentStatus === DropshipOrderStatus::DRAFT) {
+                    $order = $service->updateDropshipStatus($order, DropshipOrderStatus::PENDING_REVIEW, [
+                        'source' => 'auto_submit',
+                    ]);
+                }
+                $order->refresh();
+                $currentStatus = $order->getStatusEnum();
+                if (in_array($currentStatus, [DropshipOrderStatus::PENDING_REVIEW, DropshipOrderStatus::DRAFT], true)) {
+                    $automationService->executeRulesForOrder($order, 'order_submitted');
+                }
+                $order->refresh();
+                $currentStatus = $order->getStatusEnum();
+                if (in_array($currentStatus, [DropshipOrderStatus::AUTO_REVIEW_PASS, DropshipOrderStatus::REVIEW_PASS], true)) {
+                    $automationService->executeRulesForOrder($order, 'review_passed');
+                }
             }
 
             return response()->json([
@@ -307,8 +320,10 @@ class OverseaDropshipController extends Controller
                 $request->user()
             );
 
-            $automationService = app(\App\Services\AutomationEngineService::class);
-            $automationService->executeRulesForOrder($order, 'review_passed');
+            if ($validated['pass']) {
+                $automationService = app(\App\Services\AutomationEngineService::class);
+                $automationService->executeRulesForOrder($order, 'review_passed');
+            }
 
             return response()->json([
                 'success' => true,
