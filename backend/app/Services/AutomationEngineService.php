@@ -6,12 +6,17 @@ use App\Enums\AutomationRuleType;
 use App\Enums\DropshipOrderStatus;
 use App\Models\AutomationRule;
 use App\Models\DropshipOrder;
+use App\Exceptions\DropshipException;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use RuntimeException;
 
 class AutomationEngineService
 {
+    public function __construct(
+        protected DropshipStateMachine $stateMachine,
+    ) {}
+
     public function executeRulesForOrder(DropshipOrder $order, string $stage): array
     {
         $results = [
@@ -400,8 +405,7 @@ class AutomationEngineService
 
     protected function actionAutoReview(DropshipOrder $order, array $params): bool
     {
-        $currentStatus = $order->getStatusEnum();
-        if (!in_array($currentStatus, [DropshipOrderStatus::DRAFT, DropshipOrderStatus::PENDING_REVIEW], true)) {
+        if (!$this->stateMachine->canReview($order)) {
             return false;
         }
 
@@ -460,13 +464,7 @@ class AutomationEngineService
 
     protected function actionPushWms(DropshipOrder $order, array $params): bool
     {
-        $currentStatus = $order->getStatusEnum();
-        $pushable = [
-            DropshipOrderStatus::REVIEW_PASS,
-            DropshipOrderStatus::AUTO_REVIEW_PASS,
-            DropshipOrderStatus::PUSH_FAILED,
-        ];
-        if (!in_array($currentStatus, $pushable, true)) {
+        if (!$this->stateMachine->canPushToWms($order)) {
             return false;
         }
 
@@ -484,7 +482,7 @@ class AutomationEngineService
 
     protected function actionCancelOrder(DropshipOrder $order, array $params): bool
     {
-        if ($order->getStatusEnum()->isTerminal()) {
+        if (!$this->stateMachine->canCancel($order)) {
             return false;
         }
 

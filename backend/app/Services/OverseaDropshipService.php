@@ -3,22 +3,25 @@
 namespace App\Services;
 
 use App\Enums\DropshipOrderStatus;
+use App\Exceptions\DropshipException;
 use App\Models\DropshipOrder;
 use App\Models\DropshipOrderItem;
 use App\Models\OverseaWarehouseConfig;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
-use InvalidArgumentException;
-use RuntimeException;
 
 class OverseaDropshipService
 {
+    public function __construct(
+        protected DropshipStateMachine $stateMachine,
+    ) {}
+
     public function createDropshipOrder(array $data, User $user): DropshipOrder
     {
         return DB::transaction(function () use ($data, $user): DropshipOrder {
             $items = $data['items'] ?? [];
             if (empty($items)) {
-                throw new InvalidArgumentException('代发单至少需要一个商品明细');
+                throw DropshipException::emptyItems();
             }
 
             $order = new DropshipOrder();
@@ -63,46 +66,36 @@ class OverseaDropshipService
         ?string $remark = null,
         ?User $reviewer = null,
     ): DropshipOrder {
-        $currentStatus = $order->getStatusEnum();
-        $allowed = [DropshipOrderStatus::DRAFT, DropshipOrderStatus::PENDING_REVIEW];
-        if (!in_array($currentStatus, $allowed, true)) {
-            throw new InvalidArgumentException(
-                sprintf('当前状态 [%s] 不允许审核操作', $currentStatus->label())
-            );
-        }
+        $this->stateMachine->ensureCanReview($order);
 
         $targetStatus = $pass
             ? ($reviewer === null ? DropshipOrderStatus::AUTO_REVIEW_PASS : DropshipOrderStatus::REVIEW_PASS)
             : DropshipOrderStatus::REVIEW_REJECT;
 
-        $order->status = $targetStatus;
-        $order->reviewed_at = now();
-        $order->review_remark = $remark;
-        if ($reviewer !== null) {
-            $order->reviewed_by = $reviewer->id;
-        }
+        return DB::transaction(function () use ($order, $targetStatus, $remark, $reviewer): DropshipOrder {
+            $order = $this->stateMachine->transition($order, $targetStatus, [
+                'action' => 'review',
+                'pass' => $pass,
+                'remark' => $remark,
+                'reviewer_id' => $reviewer?->id,
+            ]);
 
-        $order->save();
+            $order->review_remark = $remark;
+            if ($reviewer !== null) {
+                $order->reviewed_by = $reviewer->id;
+            }
+            $order->save();
 
-        return $order;
+            return $order;
+        });
     }
 
     public function pushToWms(DropshipOrder $order): DropshipOrder
     {
-        $currentStatus = $order->getStatusEnum();
-        $pushable = [
-            DropshipOrderStatus::REVIEW_PASS,
-            DropshipOrderStatus::AUTO_REVIEW_PASS,
-            DropshipOrderStatus::PUSH_FAILED,
-        ];
-        if (!in_array($currentStatus, $pushable, true)) {
-            throw new InvalidArgumentException(
-                sprintf('当前状态 [%s] 不允许推送到WMS', $currentStatus->label())
-            );
-        }
+        $this->stateMachine->ensureCanPushToWms($order);
 
         if (empty($order->warehouse_id)) {
-            throw new RuntimeException('未分配海外仓，无法推送');
+            throw DropshipException::warehouseNotAssigned();
         }
 
         $warehouseConfig = OverseaWarehouseConfig::query()
@@ -111,10 +104,12 @@ class OverseaDropshipService
             ->first();
 
         if ($warehouseConfig === null) {
-            throw new RuntimeException('海外仓配置不存在或未启用');
+            throw DropshipException::warehouseConfigInvalid();
         }
 
-        $this->updateDropshipStatus($order, DropshipOrderStatus::PUSHING);
+        $order = $this->stateMachine->transition($order, DropshipOrderStatus::PUSHING, [
+            'source' => 'manual',
+        ]);
         $order->push_attempts = ($order->push_attempts ?? 0) + 1;
         $order->save();
 
@@ -122,7 +117,7 @@ class OverseaDropshipService
 
         try {
             $result = $wmsService->sendOrder($warehouseConfig, $order);
-            $this->updateDropshipStatus($order, DropshipOrderStatus::PUSH_SUCCESS, [
+            $this->stateMachine->transition($order->fresh(), DropshipOrderStatus::PUSH_SUCCESS, [
                 'wms_response' => $result,
             ]);
             if (!empty($result['wms_order_no'])) {
@@ -132,14 +127,14 @@ class OverseaDropshipService
         } catch (\Throwable $e) {
             $order->push_error = $e->getMessage();
             $order->save();
-            $this->updateDropshipStatus($order, DropshipOrderStatus::PUSH_FAILED, [
+            $this->stateMachine->transition($order->fresh(), DropshipOrderStatus::PUSH_FAILED, [
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
             ]);
             throw $e;
         }
 
-        return $order;
+        return $order->fresh();
     }
 
     public function updateDropshipStatus(
@@ -147,93 +142,29 @@ class OverseaDropshipService
         DropshipOrderStatus $status,
         array $context = [],
     ): DropshipOrder {
-        $currentStatus = $order->getStatusEnum();
-
-        if (!$currentStatus->canTransitionTo($status)) {
-            throw new InvalidArgumentException(sprintf(
-                '状态流转不合法：%s -> %s',
-                $currentStatus->label(),
-                $status->label()
-            ));
-        }
-
-        $order->status = $status;
-
-        $timestampField = $status->timestampField();
-        if ($timestampField !== null && empty($order->{$timestampField})) {
-            $order->{$timestampField} = now();
-        }
-
-        if (!empty($context)) {
-            $extraData = $order->extra_data ?? [];
-            $extraData['status_context'] = [
-                'from' => $currentStatus->value,
-                'to' => $status->value,
-                'time' => now()->toDateTimeString(),
-                'context' => $context,
-            ];
-            $order->extra_data = $extraData;
-        }
-
-        $order->save();
-
-        return $order;
+        return $this->stateMachine->transition($order, $status, $context);
     }
 
-    public function cancelOrder(DropshipOrder $order, string $reason): DropshipOrder
+    public function cancelOrder(DropshipOrder $order, string $reason, ?User $operator = null): DropshipOrder
     {
-        $currentStatus = $order->getStatusEnum();
-        if ($currentStatus->isTerminal()) {
-            throw new InvalidArgumentException(
-                sprintf('当前状态 [%s] 为终态，无法取消', $currentStatus->label())
-            );
-        }
+        $this->stateMachine->ensureCanCancel($order);
 
-        DB::transaction(function () use ($order, $reason): void {
+        return DB::transaction(function () use ($order, $reason, $operator): DropshipOrder {
             $extraData = $order->extra_data ?? [];
             $extraData['cancel_reason'] = $reason;
-            $extraData['cancelled_by'] = auth()->id();
+            $extraData['cancelled_by'] = $operator?->id ?? auth()->id();
             $order->extra_data = $extraData;
+            $order->save();
 
-            $this->updateDropshipStatus($order, DropshipOrderStatus::CANCELLED, [
+            return $this->stateMachine->transition($order, DropshipOrderStatus::CANCELLED, [
                 'reason' => $reason,
             ]);
         });
-
-        return $order;
     }
 
     public function getStatistics(): array
     {
-        $counts = DropshipOrder::query()
-            ->selectRaw('status, COUNT(*) as total')
-            ->groupBy('status')
-            ->pluck('total', 'status')
-            ->toArray();
-
-        $stats = [];
-        foreach (DropshipOrderStatus::cases() as $case) {
-            $stats[$case->value] = [
-                'label' => $case->label(),
-                'color' => $case->color(),
-                'count' => (int) ($counts[$case->value] ?? 0),
-            ];
-        }
-
-        $stats['summary'] = [
-            'total' => array_sum(array_column($stats, 'count')),
-            'pending_review' => $stats[DropshipOrderStatus::PENDING_REVIEW->value]['count'],
-            'pending_push' => $stats[DropshipOrderStatus::REVIEW_PASS->value]['count']
-                + $stats[DropshipOrderStatus::AUTO_REVIEW_PASS->value]['count']
-                + $stats[DropshipOrderStatus::PUSH_FAILED->value]['count'],
-            'in_transit' => $stats[DropshipOrderStatus::SHIPPED->value]['count']
-                + $stats[DropshipOrderStatus::IN_TRANSIT->value]['count']
-                + $stats[DropshipOrderStatus::CUSTOMS->value]['count'],
-            'completed' => $stats[DropshipOrderStatus::COMPLETED->value]['count'],
-            'exception' => $stats[DropshipOrderStatus::EXCEPTION->value]['count'],
-        ];
-
-        return $stats;
+        return app(DropshipQueryService::class)->getStatusSummary();
     }
 
     public function getWarehouseOptions(): array

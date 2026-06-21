@@ -3,9 +3,15 @@
 namespace App\Http\Controllers;
 
 use App\Enums\DropshipOrderStatus;
+use App\Exceptions\DropshipException;
 use App\Http\Resources\DropshipOrderResource;
 use App\Models\DropshipOrder;
-use App\Models\DropshipOrderItem;
+use App\Services\AutomationEngineService;
+use App\Services\DropshipPermissionService;
+use App\Services\DropshipQueryService;
+use App\Services\DropshipStateMachine;
+use App\Services\OverseaDropshipService;
+use App\Services\WmsIntegrationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -15,43 +21,29 @@ use Symfony\Component\HttpFoundation\Response as HttpResponse;
 
 class OverseaDropshipController extends Controller
 {
-    public function __construct()
-    {
+    public function __construct(
+        protected DropshipQueryService $queryService,
+        protected DropshipPermissionService $permissionService,
+        protected DropshipStateMachine $stateMachine,
+    ) {
         $this->middleware('auth:sanctum');
     }
 
     public function index(Request $request): AnonymousResourceCollection
     {
-        $query = DropshipOrder::query()
-            ->with(['items', 'warehouse', 'creator', 'reviewer'])
-            ->when($request->filled('status'), fn ($q) => $q->byStatus($request->string('status')))
-            ->when($request->filled('warehouse_id'), fn ($q) => $q->byWarehouse($request->integer('warehouse_id')))
-            ->when($request->filled('source_channel'), fn ($q) => $q->byChannel($request->string('source_channel')))
-            ->when($request->filled('receiver_country'), fn ($q) => $q->byCountry($request->string('receiver_country')))
-            ->when($request->filled('keyword'), function ($q) use ($request) {
-                $keyword = $request->string('keyword');
-                $q->where(function ($sub) use ($keyword) {
-                    $sub->where('dropship_no', 'like', "%{$keyword}%")
-                        ->orWhere('external_order_no', 'like', "%{$keyword}%")
-                        ->orWhere('wms_order_no', 'like', "%{$keyword}%")
-                        ->orWhere('tracking_no', 'like', "%{$keyword}%")
-                        ->orWhere('receiver_name', 'like', "%{$keyword}%");
-                });
-            })
-            ->when($request->filled('date_range'), function ($q) use ($request) {
-                [$start, $end] = $request->input('date_range');
-                $q->whereBetween('created_at', [$start, $end]);
-            })
-            ->orderByDesc('id');
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_VIEW);
 
-        $perPage = $request->integer('per_page', 20);
-        $orders = $perPage > 0 ? $query->paginate($perPage) : $query->get();
+        $query = $this->queryService->buildOrderQuery($request);
+        $query = $this->permissionService->applyDataScopeQuery($query, $request->user());
+        $orders = $this->queryService->paginateOrders($query, $request);
 
         return DropshipOrderResource::collection($orders);
     }
 
-    public function show(DropshipOrder $order): DropshipOrderResource
+    public function show(DropshipOrder $order, Request $request): DropshipOrderResource
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_VIEW, $order);
+
         $order->load(['items', 'warehouse', 'supplier', 'distributor', 'creator', 'reviewer', 'callbackLogs']);
 
         return new DropshipOrderResource($order);
@@ -59,6 +51,8 @@ class OverseaDropshipController extends Controller
 
     public function store(Request $request): JsonResponse
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_CREATE);
+
         $validated = $request->validate([
             'order_id' => ['nullable', 'integer', 'exists:orders,id'],
             'external_order_no' => ['nullable', 'string', 'max:64'],
@@ -96,49 +90,58 @@ class OverseaDropshipController extends Controller
         ]);
 
         try {
-            $submitNow = $validated['submit_now'] ?? false;
-            unset($validated['submit_now']);
+            return DB::transaction(function () use ($validated, $request): JsonResponse {
+                $submitNow = $validated['submit_now'] ?? false;
+                unset($validated['submit_now']);
 
-            $service = app(\App\Services\OverseaDropshipService::class);
-            $order = $service->createDropshipOrder($validated, $request->user());
+                $service = app(OverseaDropshipService::class);
+                $order = $service->createDropshipOrder($validated, $request->user());
 
-            $automationService = app(\App\Services\AutomationEngineService::class);
-            $automationService->executeRulesForOrder($order, 'order_created');
+                $automationService = app(AutomationEngineService::class);
+                $automationService->executeRulesForOrder($order, 'order_created');
 
-            if ($submitNow) {
-                $order->refresh();
-                $currentStatus = $order->getStatusEnum();
-                if ($currentStatus === DropshipOrderStatus::DRAFT) {
-                    $order = $service->updateDropshipStatus($order, DropshipOrderStatus::PENDING_REVIEW, [
-                        'source' => 'auto_submit',
-                    ]);
+                if ($submitNow) {
+                    $order->refresh();
+                    $currentStatus = $order->getStatusEnum();
+                    if ($currentStatus === DropshipOrderStatus::DRAFT) {
+                        $order = $service->updateDropshipStatus($order, DropshipOrderStatus::PENDING_REVIEW, [
+                            'source' => 'auto_submit',
+                        ]);
+                    }
+                    $order->refresh();
+                    $currentStatus = $order->getStatusEnum();
+                    if (in_array($currentStatus, [DropshipOrderStatus::PENDING_REVIEW, DropshipOrderStatus::DRAFT], true)) {
+                        $automationService->executeRulesForOrder($order, 'order_submitted');
+                    }
+                    $order->refresh();
+                    $currentStatus = $order->getStatusEnum();
+                    if (in_array($currentStatus, [DropshipOrderStatus::AUTO_REVIEW_PASS, DropshipOrderStatus::REVIEW_PASS], true)) {
+                        $automationService->executeRulesForOrder($order, 'review_passed');
+                    }
                 }
-                $order->refresh();
-                $currentStatus = $order->getStatusEnum();
-                if (in_array($currentStatus, [DropshipOrderStatus::PENDING_REVIEW, DropshipOrderStatus::DRAFT], true)) {
-                    $automationService->executeRulesForOrder($order, 'order_submitted');
-                }
-                $order->refresh();
-                $currentStatus = $order->getStatusEnum();
-                if (in_array($currentStatus, [DropshipOrderStatus::AUTO_REVIEW_PASS, DropshipOrderStatus::REVIEW_PASS], true)) {
-                    $automationService->executeRulesForOrder($order, 'review_passed');
-                }
-            }
 
-            return response()->json([
-                'success' => true,
-                'data' => new DropshipOrderResource($order->load('items')),
-            ], HttpResponse::HTTP_CREATED);
+                return response()->json([
+                    'success' => true,
+                    'data' => new DropshipOrderResource($order->load('items')),
+                ], HttpResponse::HTTP_CREATED);
+            });
+        } catch (DropshipException $e) {
+            return $this->errorResponse($e);
         } catch (\Throwable $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], HttpResponse::HTTP_BAD_REQUEST);
+            return $this->errorResponse($e, HttpResponse::HTTP_INTERNAL_SERVER_ERROR);
         }
     }
 
     public function update(Request $request, DropshipOrder $order): JsonResponse
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_EDIT, $order);
+
+        try {
+            $this->stateMachine->ensureCanEdit($order);
+        } catch (DropshipException $e) {
+            return $this->errorResponse($e);
+        }
+
         $validated = $request->validate([
             'warehouse_id' => ['sometimes', 'integer', 'exists:warehouses,id'],
             'supplier_id' => ['nullable', 'integer', 'exists:suppliers,id'],
@@ -159,13 +162,6 @@ class OverseaDropshipController extends Controller
             'remark' => ['nullable', 'string', 'max:1024'],
         ]);
 
-        if ($order->getStatusEnum()->isTerminal()) {
-            return response()->json([
-                'success' => false,
-                'message' => '订单已处于终态，无法修改',
-            ], HttpResponse::HTTP_BAD_REQUEST);
-        }
-
         $order->update($validated);
 
         return response()->json([
@@ -174,13 +170,14 @@ class OverseaDropshipController extends Controller
         ]);
     }
 
-    public function destroy(DropshipOrder $order): JsonResponse
+    public function destroy(DropshipOrder $order, Request $request): JsonResponse
     {
-        if (!$order->getStatusEnum()->isTerminal()) {
-            return response()->json([
-                'success' => false,
-                'message' => '订单未处于终态，无法删除',
-            ], HttpResponse::HTTP_BAD_REQUEST);
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_DELETE, $order);
+
+        try {
+            $this->stateMachine->ensureCanDelete($order);
+        } catch (DropshipException $e) {
+            return $this->errorResponse($e);
         }
 
         $order->delete();
@@ -193,62 +190,18 @@ class OverseaDropshipController extends Controller
 
     public function statistics(Request $request): JsonResponse
     {
-        $baseQuery = DropshipOrder::query()
-            ->when($request->filled('warehouse_id'), fn ($q) => $q->byWarehouse($request->integer('warehouse_id')))
-            ->when($request->filled('date_range'), function ($q) use ($request) {
-                [$start, $end] = $request->input('date_range');
-                $q->whereBetween('created_at', [$start, $end]);
-            });
-
-        $statusCounts = [];
-        foreach (DropshipOrderStatus::cases() as $status) {
-            $statusCounts[$status->value] = (clone $baseQuery)->byStatus($status)->count();
-        }
-
-        $totalOrders = (clone $baseQuery)->count();
-        $totalCost = (clone $baseQuery)->sum('total_cost');
-        $pendingReview = (clone $baseQuery)->whereIn('status', [
-            DropshipOrderStatus::PENDING_REVIEW->value,
-        ])->count();
-        $pendingPush = (clone $baseQuery)->pendingPush()->count();
-        $inFulfillment = (clone $baseQuery)->inFulfillment()->count();
-        $inTransit = (clone $baseQuery)->inTransit()->count();
-        $completed = (clone $baseQuery)->byStatus(DropshipOrderStatus::COMPLETED)->count();
-        $cancelled = (clone $baseQuery)->byStatus(DropshipOrderStatus::CANCELLED)->count();
-        $exceptions = (clone $baseQuery)->byStatus(DropshipOrderStatus::EXCEPTION)->count();
-
-        $pushFailed = (clone $baseQuery)->byStatus(DropshipOrderStatus::PUSH_FAILED)->count();
-
-        $todayOrders = (clone $baseQuery)->whereDate('created_at', today())->count();
-        $todayShipped = (clone $baseQuery)->whereDate('shipped_at', today())->count();
-        $todayDelivered = (clone $baseQuery)->whereDate('delivered_at', today())->count();
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_VIEW);
 
         return response()->json([
             'success' => true,
-            'data' => [
-                'total_orders' => $totalOrders,
-                'total_cost' => round($totalCost, 2),
-                'status_counts' => $statusCounts,
-                'pending_review' => $pendingReview,
-                'pending_push' => $pendingPush,
-                'in_fulfillment' => $inFulfillment,
-                'in_transit' => $inTransit,
-                'completed' => $completed,
-                'cancelled' => $cancelled,
-                'exceptions' => $exceptions,
-                'push_failed' => $pushFailed,
-                'completion_rate' => $totalOrders > 0 ? round(($completed / $totalOrders) * 100, 2) : 0,
-                'today' => [
-                    'orders' => $todayOrders,
-                    'shipped' => $todayShipped,
-                    'delivered' => $todayDelivered,
-                ],
-            ],
+            'data' => $this->queryService->getOrderStatistics($request),
         ]);
     }
 
     public function batchReview(Request $request): JsonResponse
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_REVIEW);
+
         $validated = $request->validate([
             'ids' => ['required', 'array', 'min:1'],
             'ids.*' => ['integer', 'exists:dropship_orders,id'],
@@ -256,13 +209,13 @@ class OverseaDropshipController extends Controller
             'remark' => ['nullable', 'string', 'max:1024'],
         ]);
 
-        $service = app(\App\Services\OverseaDropshipService::class);
-        $automationService = app(\App\Services\AutomationEngineService::class);
+        $service = app(OverseaDropshipService::class);
+        $automationService = app(AutomationEngineService::class);
         $user = $request->user();
 
         $orders = DropshipOrder::query()
             ->whereIn('id', $validated['ids'])
-            ->whereIn('status', [DropshipOrderStatus::PENDING_REVIEW->value, DropshipOrderStatus::DRAFT->value])
+            ->whereIn('status', $this->stateMachine->getReviewableStatusValues())
             ->get();
 
         $successCount = 0;
@@ -271,6 +224,8 @@ class OverseaDropshipController extends Controller
         DB::transaction(function () use ($orders, $validated, $service, $automationService, $user, &$successCount, &$failed) {
             foreach ($orders as $order) {
                 try {
+                    $this->permissionService->ensureCan($user, DropshipPermissionService::ACTION_REVIEW, $order);
+
                     $service->reviewOrder(
                         $order,
                         $validated['pass'],
@@ -283,6 +238,13 @@ class OverseaDropshipController extends Controller
                     }
 
                     $successCount++;
+                } catch (DropshipException $e) {
+                    $failed[] = [
+                        'id' => $order->id,
+                        'dropship_no' => $order->dropship_no,
+                        'error' => $e->getMessage(),
+                        'error_code' => $e->getErrorCode(),
+                    ];
                 } catch (\Throwable $e) {
                     $failed[] = [
                         'id' => $order->id,
@@ -306,13 +268,15 @@ class OverseaDropshipController extends Controller
 
     public function review(Request $request, DropshipOrder $order): JsonResponse
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_REVIEW, $order);
+
         $validated = $request->validate([
             'pass' => ['required', 'boolean'],
             'remark' => ['nullable', 'string', 'max:1024'],
         ]);
 
         try {
-            $service = app(\App\Services\OverseaDropshipService::class);
+            $service = app(OverseaDropshipService::class);
             $order = $service->reviewOrder(
                 $order,
                 $validated['pass'],
@@ -321,7 +285,7 @@ class OverseaDropshipController extends Controller
             );
 
             if ($validated['pass']) {
-                $automationService = app(\App\Services\AutomationEngineService::class);
+                $automationService = app(AutomationEngineService::class);
                 $automationService->executeRulesForOrder($order, 'review_passed');
             }
 
@@ -330,18 +294,19 @@ class OverseaDropshipController extends Controller
                 'data' => new DropshipOrderResource($order->fresh()),
                 'message' => $validated['pass'] ? '审核通过' : '审核拒绝',
             ]);
+        } catch (DropshipException $e) {
+            return $this->errorResponse($e);
         } catch (\Throwable $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], HttpResponse::HTTP_BAD_REQUEST);
+            return $this->errorResponse($e, HttpResponse::HTTP_INTERNAL_SERVER_ERROR);
         }
     }
 
-    public function push(DropshipOrder $order): JsonResponse
+    public function push(DropshipOrder $order, Request $request): JsonResponse
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_PUSH, $order);
+
         try {
-            $service = app(\App\Services\OverseaDropshipService::class);
+            $service = app(OverseaDropshipService::class);
             $order = $service->pushToWms($order);
 
             return response()->json([
@@ -349,41 +314,48 @@ class OverseaDropshipController extends Controller
                 'data' => new DropshipOrderResource($order->fresh()),
                 'message' => '推单成功',
             ]);
+        } catch (DropshipException $e) {
+            return $this->errorResponse($e);
         } catch (\Throwable $e) {
-            return response()->json([
-                'success' => false,
-                'message' => '推单失败：' . $e->getMessage(),
-            ], HttpResponse::HTTP_INTERNAL_SERVER_ERROR);
+            return $this->errorResponse(
+                new DropshipException('推单失败：' . $e->getMessage(), DropshipException::WMS_API_ERROR),
+                HttpResponse::HTTP_INTERNAL_SERVER_ERROR
+            );
         }
     }
 
     public function batchPush(Request $request): JsonResponse
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_PUSH);
+
         $validated = $request->validate([
             'ids' => ['required', 'array', 'min:1'],
             'ids.*' => ['integer', 'exists:dropship_orders,id'],
         ]);
 
-        $allowedStatuses = [
-            DropshipOrderStatus::REVIEW_PASS->value,
-            DropshipOrderStatus::AUTO_REVIEW_PASS->value,
-            DropshipOrderStatus::PUSH_FAILED->value,
-        ];
-
         $orders = DropshipOrder::query()
             ->whereIn('id', $validated['ids'])
-            ->whereIn('status', $allowedStatuses)
+            ->whereIn('status', $this->stateMachine->getPushableStatusValues())
             ->get();
 
-        $service = app(\App\Services\OverseaDropshipService::class);
+        $service = app(OverseaDropshipService::class);
+        $user = $request->user();
 
         $successCount = 0;
         $failed = [];
 
         foreach ($orders as $order) {
             try {
+                $this->permissionService->ensureCan($user, DropshipPermissionService::ACTION_PUSH, $order);
                 $service->pushToWms($order);
                 $successCount++;
+            } catch (DropshipException $e) {
+                $failed[] = [
+                    'id' => $order->id,
+                    'dropship_no' => $order->dropship_no,
+                    'error' => $e->getMessage(),
+                    'error_code' => $e->getErrorCode(),
+                ];
             } catch (\Throwable $e) {
                 $failed[] = [
                     'id' => $order->id,
@@ -406,13 +378,15 @@ class OverseaDropshipController extends Controller
 
     public function updateStatus(Request $request, DropshipOrder $order): JsonResponse
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_UPDATE_STATUS, $order);
+
         $validated = $request->validate([
             'status' => ['required', new Enum(DropshipOrderStatus::class)],
             'remark' => ['nullable', 'string', 'max:1024'],
         ]);
 
         try {
-            $service = app(\App\Services\OverseaDropshipService::class);
+            $service = app(OverseaDropshipService::class);
             $context = [];
             if (!empty($validated['remark'])) {
                 $context['remark'] = $validated['remark'];
@@ -424,54 +398,73 @@ class OverseaDropshipController extends Controller
                 'data' => new DropshipOrderResource($order->fresh()),
                 'message' => '状态更新成功',
             ]);
+        } catch (DropshipException $e) {
+            return $this->errorResponse($e);
         } catch (\Throwable $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], HttpResponse::HTTP_BAD_REQUEST);
+            return $this->errorResponse($e, HttpResponse::HTTP_INTERNAL_SERVER_ERROR);
         }
     }
 
     public function cancel(Request $request, DropshipOrder $order): JsonResponse
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_CANCEL, $order);
+
         $validated = $request->validate([
             'reason' => ['nullable', 'string', 'max:1024'],
         ]);
 
         try {
-            $service = app(\App\Services\OverseaDropshipService::class);
-            $order = $service->cancelOrder($order, $validated['reason'] ?? '用户取消');
+            $service = app(OverseaDropshipService::class);
+            $order = $service->cancelOrder($order, $validated['reason'] ?? '用户取消', $request->user());
 
             return response()->json([
                 'success' => true,
                 'data' => new DropshipOrderResource($order->fresh()),
                 'message' => '订单已取消',
             ]);
+        } catch (DropshipException $e) {
+            return $this->errorResponse($e);
         } catch (\Throwable $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], HttpResponse::HTTP_BAD_REQUEST);
+            return $this->errorResponse($e, HttpResponse::HTTP_INTERNAL_SERVER_ERROR);
         }
     }
 
-    public function retryPush(DropshipOrder $order): JsonResponse
+    public function retryPush(DropshipOrder $order, Request $request): JsonResponse
     {
-        if ($order->getStatusEnum() !== DropshipOrderStatus::PUSH_FAILED) {
-            return response()->json([
-                'success' => false,
-                'message' => '只有推单失败状态才能重试推单',
-            ], HttpResponse::HTTP_BAD_REQUEST);
-        }
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_PUSH, $order);
 
-        return $this->push($order);
-    }
-
-    public function syncTracking(DropshipOrder $order): JsonResponse
-    {
         try {
-            $wmsService = app(\App\Services\WmsIntegrationService::class);
-            $trackingEvents = $wmsService->fetchTracking($order);
+            $this->stateMachine->ensureCanRetryPush($order);
+        } catch (DropshipException $e) {
+            return $this->errorResponse($e);
+        }
+
+        return $this->push($order, $request);
+    }
+
+    public function syncTracking(DropshipOrder $order, Request $request): JsonResponse
+    {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_SYNC_TRACKING, $order);
+
+        try {
+            if (empty($order->warehouse_id) || empty($order->wms_order_no)) {
+                throw new DropshipException(
+                    '缺少仓库或WMS单号，无法同步物流轨迹',
+                    DropshipException::WAREHOUSE_NOT_ASSIGNED
+                );
+            }
+
+            $wmsService = app(WmsIntegrationService::class);
+            $config = \App\Models\OverseaWarehouseConfig::query()
+                ->where('warehouse_id', $order->warehouse_id)
+                ->active()
+                ->first();
+
+            if ($config === null) {
+                throw DropshipException::warehouseConfigInvalid();
+            }
+
+            $trackingEvents = $wmsService->fetchTracking($config, $order);
 
             return response()->json([
                 'success' => true,
@@ -480,11 +473,13 @@ class OverseaDropshipController extends Controller
                 ],
                 'message' => '物流轨迹同步成功',
             ]);
+        } catch (DropshipException $e) {
+            return $this->errorResponse($e);
         } catch (\Throwable $e) {
-            return response()->json([
-                'success' => false,
-                'message' => '物流轨迹同步失败：' . $e->getMessage(),
-            ], HttpResponse::HTTP_INTERNAL_SERVER_ERROR);
+            return $this->errorResponse(
+                new DropshipException('物流轨迹同步失败：' . $e->getMessage(), DropshipException::WMS_API_ERROR),
+                HttpResponse::HTTP_INTERNAL_SERVER_ERROR
+            );
         }
     }
 
@@ -514,5 +509,22 @@ class OverseaDropshipController extends Controller
             'success' => true,
             'data' => $channels,
         ]);
+    }
+
+    protected function errorResponse(\Throwable $e, int $statusCode = HttpResponse::HTTP_BAD_REQUEST): JsonResponse
+    {
+        $data = [
+            'success' => false,
+            'message' => $e->getMessage(),
+        ];
+
+        if ($e instanceof DropshipException) {
+            $data['error_code'] = $e->getErrorCode();
+            if (!empty($e->getContext())) {
+                $data['context'] = $e->getContext();
+            }
+        }
+
+        return response()->json($data, $statusCode);
     }
 }

@@ -7,6 +7,10 @@ use App\Enums\WmsCallbackType;
 use App\Http\Resources\WmsCallbackLogResource;
 use App\Models\DropshipOrder;
 use App\Models\WmsCallbackLog;
+use App\Services\DropshipPermissionService;
+use App\Services\DropshipQueryService;
+use App\Services\DropshipStateMachine;
+use App\Services\WmsIntegrationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -16,53 +20,36 @@ use Symfony\Component\HttpFoundation\Response as HttpResponse;
 
 class WmsCallbackLogController extends Controller
 {
-    public function __construct()
-    {
+    public function __construct(
+        protected DropshipQueryService $queryService,
+        protected DropshipPermissionService $permissionService,
+    ) {
         $this->middleware('auth:sanctum');
     }
 
     public function index(Request $request): AnonymousResourceCollection
     {
-        $query = WmsCallbackLog::query()
-            ->with(['warehouse', 'dropshipOrder', 'processor'])
-            ->when($request->filled('callback_type'), fn ($q) => $q->byType($request->string('callback_type')))
-            ->when($request->filled('status'), fn ($q) => $q->byStatus($request->string('status')))
-            ->when($request->filled('warehouse_id'), fn ($q) => $q->byWarehouse($request->integer('warehouse_id')))
-            ->when($request->filled('wms_provider'), fn ($q) => $q->byProvider($request->string('wms_provider')))
-            ->when($request->filled('dropship_order_id'), fn ($q) => $q->byOrder($request->integer('dropship_order_id')))
-            ->when($request->filled('request_id'), fn ($q) => $q->byRequestId($request->string('request_id')))
-            ->when($request->filled('keyword'), function ($q) use ($request) {
-                $keyword = $request->string('keyword');
-                $q->where(function ($sub) use ($keyword) {
-                    $sub->where('wms_order_no', 'like', "%{$keyword}%")
-                        ->orWhere('reference_no', 'like', "%{$keyword}%")
-                        ->orWhere('request_id', 'like', "%{$keyword}%")
-                        ->orWhereHas('dropshipOrder', function ($oq) use ($keyword) {
-                            $oq->where('dropship_no', 'like', "%{$keyword}%");
-                        });
-                });
-            })
-            ->when($request->filled('date_range'), function ($q) use ($request) {
-                [$start, $end] = $request->input('date_range');
-                $q->whereBetween('created_at', [$start, $end]);
-            })
-            ->orderByDesc('id');
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_VIEW);
 
-        $perPage = $request->integer('per_page', 20);
-        $logs = $perPage > 0 ? $query->paginate($perPage) : $query->get();
+        $query = $this->queryService->buildCallbackLogQuery($request);
+        $logs = $this->queryService->paginateOrders($query, $request);
 
         return WmsCallbackLogResource::collection($logs);
     }
 
-    public function show(WmsCallbackLog $log): WmsCallbackLogResource
+    public function show(WmsCallbackLog $log, Request $request): WmsCallbackLogResource
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_VIEW);
+
         $log->load(['warehouse', 'dropshipOrder', 'processor']);
 
         return new WmsCallbackLogResource($log);
     }
 
-    public function retry(WmsCallbackLog $log): JsonResponse
+    public function retry(WmsCallbackLog $log, Request $request): JsonResponse
     {
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_UPDATE_STATUS);
+
         if (!$log->isFailed() && !$log->isRetry()) {
             return response()->json([
                 'success' => false,
@@ -71,10 +58,10 @@ class WmsCallbackLogController extends Controller
         }
 
         try {
-            $wmsService = app(\App\Services\WmsIntegrationService::class);
+            $wmsService = app(WmsIntegrationService::class);
             $wmsService->handleCallback($log);
 
-            $log->processed_by = request()->user()?->id;
+            $log->processed_by = $request->user()?->id;
             $log->save();
 
             return response()->json([
@@ -90,282 +77,13 @@ class WmsCallbackLogController extends Controller
         }
     }
 
-    private function processOrderStatusCallback(WmsCallbackLog $log, array $body, array &$responseData): bool
-    {
-        $order = $log->dropshipOrder;
-        if (!$order) {
-            $wmsOrderNo = $body['wms_order_no'] ?? $log->wms_order_no;
-            $order = DropshipOrder::query()
-                ->where('wms_order_no', $wmsOrderNo)
-                ->first();
-        }
-
-        if (!$order) {
-            throw new \RuntimeException('找不到关联的代发订单');
-        }
-
-        $statusMap = [
-            'processing' => DropshipOrderStatus::PROCESSING,
-            'picked' => DropshipOrderStatus::PICKED,
-            'packed' => DropshipOrderStatus::PACKED,
-            'shipped' => DropshipOrderStatus::SHIPPED,
-            'in_transit' => DropshipOrderStatus::IN_TRANSIT,
-            'customs' => DropshipOrderStatus::CUSTOMS,
-            'delivered' => DropshipOrderStatus::DELIVERED,
-            'completed' => DropshipOrderStatus::COMPLETED,
-            'cancelled' => DropshipOrderStatus::CANCELLED,
-            'returned' => DropshipOrderStatus::RETURNED,
-            'exception' => DropshipOrderStatus::EXCEPTION,
-        ];
-
-        $wmsStatus = $body['status'] ?? '';
-        if (isset($statusMap[$wmsStatus])) {
-            $targetStatus = $statusMap[$wmsStatus];
-            if ($order->getStatusEnum()->canTransitionTo($targetStatus)) {
-                $order->status = $targetStatus;
-                $timestampField = $targetStatus->timestampField();
-                if ($timestampField !== null) {
-                    $order->{$timestampField} = now();
-                }
-                $order->save();
-                $responseData = [
-                    'order_id' => $order->id,
-                    'old_status' => $order->getOriginal('status'),
-                    'new_status' => $targetStatus->value,
-                ];
-            } else {
-                $responseData = [
-                    'message' => '状态无需变更或不允许跳转',
-                    'current_status' => $order->status,
-                    'target_status' => $targetStatus->value,
-                ];
-            }
-        } else {
-            $responseData = ['message' => '未知WMS状态: ' . $wmsStatus];
-        }
-
-        return true;
-    }
-
-    private function processShipmentCallback(WmsCallbackLog $log, array $body, array &$responseData): bool
-    {
-        $order = $log->dropshipOrder;
-        if (!$order) {
-            $wmsOrderNo = $body['wms_order_no'] ?? $log->wms_order_no;
-            $order = DropshipOrder::query()
-                ->where('wms_order_no', $wmsOrderNo)
-                ->first();
-        }
-
-        if (!$order) {
-            throw new \RuntimeException('找不到关联的代发订单');
-        }
-
-        if (!empty($body['tracking_no'])) {
-            $order->tracking_no = $body['tracking_no'];
-        }
-        if (!empty($body['carrier_name'])) {
-            $order->carrier_name = $body['carrier_name'];
-        }
-        if (!empty($body['shipping_method'])) {
-            $order->shipping_method_code = $body['shipping_method'];
-        }
-        if (!empty($body['shipped_at'])) {
-            $order->shipped_at = $body['shipped_at'];
-        } else {
-            $order->shipped_at = now();
-        }
-
-        if ($order->getStatusEnum()->canTransitionTo(DropshipOrderStatus::SHIPPED)) {
-            $order->status = DropshipOrderStatus::SHIPPED;
-        }
-
-        if (!empty($body['items'])) {
-            foreach ($body['items'] as $itemData) {
-                $item = $order->items()
-                    ->where('sku', $itemData['sku'] ?? '')
-                    ->first();
-                if ($item && isset($itemData['shipped_quantity'])) {
-                    $item->shipped_quantity = (int) $itemData['shipped_quantity'];
-                    $item->save();
-                }
-            }
-        }
-
-        $order->save();
-
-        $responseData = [
-            'order_id' => $order->id,
-            'tracking_no' => $order->tracking_no,
-            'carrier_name' => $order->carrier_name,
-            'shipped_at' => $order->shipped_at?->toDateTimeString(),
-        ];
-
-        return true;
-    }
-
-    private function processTrackingCallback(WmsCallbackLog $log, array $body, array &$responseData): bool
-    {
-        $order = $log->dropshipOrder;
-        if (!$order) {
-            $wmsOrderNo = $body['wms_order_no'] ?? $log->wms_order_no;
-            $order = DropshipOrder::query()
-                ->where('wms_order_no', $wmsOrderNo)
-                ->orWhere('tracking_no', $body['tracking_no'] ?? '')
-                ->first();
-        }
-
-        if (!$order) {
-            throw new \RuntimeException('找不到关联的代发订单');
-        }
-
-        if (!empty($body['tracking_no']) && empty($order->tracking_no)) {
-            $order->tracking_no = $body['tracking_no'];
-        }
-        if (!empty($body['carrier_name']) && empty($order->carrier_name)) {
-            $order->carrier_name = $body['carrier_name'];
-        }
-
-        $events = $body['events'] ?? $body['tracking_history'] ?? [];
-        if (!empty($events)) {
-            $history = $order->tracking_history ?? [];
-            foreach ($events as $event) {
-                $order->addTrackingEvent(
-                    $event['status'] ?? $event['code'] ?? 'update',
-                    $event['location'] ?? '',
-                    $event['description'] ?? $event['message'] ?? ''
-                );
-            }
-        } else {
-            $order->addTrackingEvent(
-                $body['status'] ?? 'update',
-                $body['location'] ?? '',
-                $body['description'] ?? $body['message'] ?? '物流轨迹更新'
-            );
-        }
-
-        $statusMap = [
-            'in_transit' => DropshipOrderStatus::IN_TRANSIT,
-            'customs' => DropshipOrderStatus::CUSTOMS,
-            'delivered' => DropshipOrderStatus::DELIVERED,
-            'returned' => DropshipOrderStatus::RETURNED,
-        ];
-        $trackStatus = $body['status'] ?? '';
-        if (isset($statusMap[$trackStatus]) && $order->getStatusEnum()->canTransitionTo($statusMap[$trackStatus])) {
-            $order->status = $statusMap[$trackStatus];
-            $timestampField = $statusMap[$trackStatus]->timestampField();
-            if ($timestampField !== null) {
-                $order->{$timestampField} = now();
-            }
-        }
-
-        $order->save();
-
-        $responseData = [
-            'order_id' => $order->id,
-            'events_added' => count($events) ?: 1,
-            'current_status' => $order->status,
-        ];
-
-        return true;
-    }
-
-    private function processInventoryCallback(WmsCallbackLog $log, array $body, array &$responseData): bool
-    {
-        $inventoryData = $body['inventory'] ?? $body['items'] ?? [];
-        $updatedCount = 0;
-
-        foreach ($inventoryData as $inv) {
-            $sku = $inv['sku'] ?? $inv['product_sku'] ?? '';
-            $quantity = $inv['quantity'] ?? $inv['stock'] ?? $inv['available'] ?? null;
-            if (empty($sku) || $quantity === null) {
-                continue;
-            }
-            $updatedCount++;
-        }
-
-        $responseData = [
-            'warehouse_id' => $log->warehouse_id,
-            'items_processed' => count($inventoryData),
-            'items_updated' => $updatedCount,
-        ];
-
-        return true;
-    }
-
-    private function processStockAdjustCallback(WmsCallbackLog $log, array $body, array &$responseData): bool
-    {
-        $adjustments = $body['adjustments'] ?? [$body] ?? [];
-        $count = count($adjustments);
-
-        $responseData = [
-            'warehouse_id' => $log->warehouse_id,
-            'adjustments_count' => $count,
-            'processed' => true,
-        ];
-
-        return true;
-    }
-
     public function statistics(Request $request): JsonResponse
     {
-        $baseQuery = WmsCallbackLog::query()
-            ->when($request->filled('warehouse_id'), fn ($q) => $q->byWarehouse($request->integer('warehouse_id')))
-            ->when($request->filled('wms_provider'), fn ($q) => $q->byProvider($request->string('wms_provider')))
-            ->when($request->filled('date_range'), function ($q) use ($request) {
-                [$start, $end] = $request->input('date_range');
-                $q->whereBetween('created_at', [$start, $end]);
-            });
-
-        $totalLogs = (clone $baseQuery)->count();
-        $receivedCount = (clone $baseQuery)->where('status', 'received')->count();
-        $processingCount = (clone $baseQuery)->where('status', 'processing')->count();
-        $successCount = (clone $baseQuery)->success()->count();
-        $failedCount = (clone $baseQuery)->failed()->count();
-        $retryCount = (clone $baseQuery)->where('status', 'retry')->count();
-        $pendingCount = (clone $baseQuery)->pending()->count();
-
-        $typeStats = [];
-        foreach (WmsCallbackType::cases() as $type) {
-            $typeQuery = (clone $baseQuery)->byType($type);
-            $typeStats[$type->value] = [
-                'label' => $type->label(),
-                'color' => $type->color(),
-                'total' => (clone $typeQuery)->count(),
-                'success' => (clone $typeQuery)->success()->count(),
-                'failed' => (clone $typeQuery)->failed()->count(),
-                'pending' => (clone $typeQuery)->pending()->count(),
-            ];
-        }
-
-        $avgRetry = (clone $baseQuery)->avg('retry_count') ?? 0;
-        $maxRetry = (clone $baseQuery)->max('retry_count') ?? 0;
-
-        $today = (clone $baseQuery)->whereDate('created_at', today());
-        $todayTotal = (clone $today)->count();
-        $todaySuccess = (clone $today)->success()->count();
-        $todayFailed = (clone $today)->failed()->count();
+        $this->permissionService->ensureCan($request->user(), DropshipPermissionService::ACTION_VIEW);
 
         return response()->json([
             'success' => true,
-            'data' => [
-                'total' => $totalLogs,
-                'received' => $receivedCount,
-                'processing' => $processingCount,
-                'success' => $successCount,
-                'failed' => $failedCount,
-                'retry' => $retryCount,
-                'pending' => $pendingCount,
-                'success_rate' => $totalLogs > 0 ? round(($successCount / $totalLogs) * 100, 2) . '%' : '0%',
-                'average_retry_count' => round($avgRetry, 2),
-                'max_retry_count' => (int) $maxRetry,
-                'type_statistics' => $typeStats,
-                'today' => [
-                    'total' => $todayTotal,
-                    'success' => $todaySuccess,
-                    'failed' => $todayFailed,
-                ],
-            ],
+            'data' => $this->queryService->getCallbackLogStatistics($request),
         ]);
     }
 

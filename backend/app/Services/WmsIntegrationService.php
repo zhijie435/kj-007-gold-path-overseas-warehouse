@@ -4,16 +4,20 @@ namespace App\Services;
 
 use App\Enums\DropshipOrderStatus;
 use App\Enums\WmsCallbackType;
+use App\Exceptions\DropshipException;
 use App\Models\DropshipOrder;
 use App\Models\OverseaWarehouseConfig;
 use App\Models\WmsCallbackLog;
 use App\Services\AutomationEngineService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
-use RuntimeException;
 
 class WmsIntegrationService
 {
+    public function __construct(
+        protected DropshipStateMachine $stateMachine,
+    ) {}
+
     public function sendOrder(OverseaWarehouseConfig $config, DropshipOrder $order): array
     {
         $this->updateLastApiCall($config);
@@ -22,11 +26,7 @@ class WmsIntegrationService
         $response = $this->callApi($config, 'order/create', $payload);
 
         if (empty($response['success'])) {
-            throw new RuntimeException(sprintf(
-                'WMS[%s]推单失败：%s',
-                $config->wms_provider,
-                $response['message'] ?? '未知错误'
-            ));
+            throw DropshipException::wmsApiError($config->wms_provider, $response['message'] ?? '未知错误');
         }
 
         return [
@@ -44,11 +44,7 @@ class WmsIntegrationService
         ]);
 
         if (empty($response['success'])) {
-            throw new RuntimeException(sprintf(
-                'WMS[%s]拉取库存失败：%s',
-                $config->wms_provider,
-                $response['message'] ?? '未知错误'
-            ));
+            throw DropshipException::wmsApiError($config->wms_provider, $response['message'] ?? '拉取库存失败');
         }
 
         $config->last_inventory_sync_at = now();
@@ -73,11 +69,7 @@ class WmsIntegrationService
         $response = $this->callApi($config, 'tracking/query', $payload);
 
         if (empty($response['success'])) {
-            throw new RuntimeException(sprintf(
-                'WMS[%s]拉取物流轨迹失败：%s',
-                $config->wms_provider,
-                $response['message'] ?? '未知错误'
-            ));
+            throw DropshipException::wmsApiError($config->wms_provider, $response['message'] ?? '拉取物流轨迹失败');
         }
 
         $trackingData = $response['data'] ?? [];
@@ -268,32 +260,20 @@ class WmsIntegrationService
             return;
         }
 
-        $statusMap = [
-            'processing' => DropshipOrderStatus::PROCESSING,
-            'picked' => DropshipOrderStatus::PICKED,
-            'packed' => DropshipOrderStatus::PACKED,
-            'shipped' => DropshipOrderStatus::SHIPPED,
-            'in_transit' => DropshipOrderStatus::IN_TRANSIT,
-            'transit' => DropshipOrderStatus::IN_TRANSIT,
-            'customs' => DropshipOrderStatus::CUSTOMS,
-            'clearance' => DropshipOrderStatus::CUSTOMS,
-            'delivered' => DropshipOrderStatus::DELIVERED,
-            'completed' => DropshipOrderStatus::COMPLETED,
-            'returned' => DropshipOrderStatus::RETURNED,
-            'exception' => DropshipOrderStatus::EXCEPTION,
-        ];
+        $targetStatus = $this->stateMachine->mapWmsStatus($status);
+        if ($targetStatus === null) {
+            return;
+        }
 
-        $targetStatus = $statusMap[strtolower($status)] ?? null;
-        if ($targetStatus !== null) {
+        try {
+            $oldStatus = $order->getStatusEnum();
+            $this->stateMachine->ensureCanTransition($order, $targetStatus);
             $dropshipService = app(OverseaDropshipService::class);
-            try {
-                $oldStatus = $order->getStatusEnum();
-                $dropshipService->updateDropshipStatus($order, $targetStatus, ['source' => 'tracking_sync']);
+            $dropshipService->updateDropshipStatus($order, $targetStatus, ['source' => 'tracking_sync']);
 
-                $this->triggerAutomationRules($order, $oldStatus, $targetStatus);
-            } catch (\Throwable $e) {
-                report($e);
-            }
+            $this->triggerAutomationRules($order, $oldStatus, $targetStatus);
+        } catch (\Throwable $e) {
+            report($e);
         }
     }
 
@@ -305,10 +285,11 @@ class WmsIntegrationService
             $automationService->executeRulesForOrder($order, 'order_exception');
         }
 
-        if ($newStatus === DropshipOrderStatus::SHIPPED
-            || $newStatus === DropshipOrderStatus::IN_TRANSIT
-            || $newStatus === DropshipOrderStatus::CUSTOMS
-        ) {
+        if (in_array($newStatus, [
+            DropshipOrderStatus::SHIPPED,
+            DropshipOrderStatus::IN_TRANSIT,
+            DropshipOrderStatus::CUSTOMS,
+        ], true)) {
             try {
                 $automationService->executeRulesForOrder($order, 'scheduled');
             } catch (\Throwable $e) {
@@ -353,9 +334,9 @@ class WmsIntegrationService
             $order->extra_data = $extra;
         }
 
-        $dropshipService = app(OverseaDropshipService::class);
         try {
             $oldStatus = $order->getStatusEnum();
+            $dropshipService = app(OverseaDropshipService::class);
             $dropshipService->updateDropshipStatus($order, DropshipOrderStatus::SHIPPED, [
                 'source' => 'shipment_callback',
                 'tracking_no' => $order->tracking_no,

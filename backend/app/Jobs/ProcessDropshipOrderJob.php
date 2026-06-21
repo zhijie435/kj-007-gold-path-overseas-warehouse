@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Enums\DropshipOrderStatus;
 use App\Models\DropshipOrder;
+use App\Services\DropshipStateMachine;
 use App\Services\OverseaDropshipService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -35,22 +36,15 @@ class ProcessDropshipOrderJob implements ShouldQueue
         return now()->addHours(24);
     }
 
-    public function handle(OverseaDropshipService $service): void
+    public function handle(OverseaDropshipService $service, DropshipStateMachine $stateMachine): void
     {
         $this->order->refresh();
 
-        $currentStatus = $this->order->getStatusEnum();
-        $pushable = [
-            DropshipOrderStatus::REVIEW_PASS,
-            DropshipOrderStatus::AUTO_REVIEW_PASS,
-            DropshipOrderStatus::PUSH_FAILED,
-        ];
-
-        if (!in_array($currentStatus, $pushable, true)) {
+        if (!$stateMachine->canPushToWms($this->order)) {
             Log::info(sprintf(
                 '[ProcessDropshipOrderJob] 代发单 %s 当前状态 %s 不满足推送条件，跳过',
                 $this->order->dropship_no,
-                $currentStatus->value
+                $this->order->getStatusEnum()->value
             ));
             $this->delete();
             return;
