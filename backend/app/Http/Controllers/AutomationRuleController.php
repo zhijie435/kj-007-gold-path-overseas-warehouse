@@ -158,109 +158,20 @@ class AutomationRuleController extends Controller
             ], HttpResponse::HTTP_BAD_REQUEST);
         }
 
-        $type = $rule->getTypeEnum();
-
         try {
-            $result = DB::transaction(function () use ($rule, $type) {
-                $processedCount = 0;
-                $successCount = 0;
-                $failedCount = 0;
-                $errors = [];
-
-                $ordersQuery = DropshipOrder::query();
-
-                switch ($type) {
-                    case AutomationRuleType::AUTO_REVIEW:
-                        $ordersQuery = $ordersQuery
-                            ->where('status', \App\Enums\DropshipOrderStatus::PENDING_REVIEW->value);
-                        break;
-                    case AutomationRuleType::AUTO_PUSH_WMS:
-                        $ordersQuery = $ordersQuery->pendingPush();
-                        break;
-                    case AutomationRuleType::AUTO_SYNC_TRACKING:
-                    case AutomationRuleType::AUTO_SYNC_INVENTORY:
-                    case AutomationRuleType::AUTO_NOTIFICATION:
-                        $processedCount = random_int(1, 50);
-                        $successCount = random_int(1, $processedCount);
-                        $failedCount = $processedCount - $successCount;
-                        break;
-                    default:
-                        $ordersQuery = $ordersQuery->limit(100);
-                }
-
-                if ($rule->warehouse_id !== null) {
-                    $ordersQuery = $ordersQuery->where('warehouse_id', $rule->warehouse_id);
-                }
-                if ($rule->country_code !== null) {
-                    $ordersQuery = $ordersQuery->where('receiver_country', $rule->country_code);
-                }
-                if ($rule->source_channel !== null) {
-                    $ordersQuery = $ordersQuery->where('source_channel', $rule->source_channel);
-                }
-
-                $orders = $ordersQuery->limit(100)->get();
-
-                foreach ($orders as $order) {
-                    if (!$rule->matchesBasicConditions([
-                        'amount' => (float) ($order->total_cost ?? 0),
-                    ])) {
-                        continue;
-                    }
-
-                    $processedCount++;
-                    try {
-                        switch ($type) {
-                            case AutomationRuleType::AUTO_REVIEW:
-                                $order->status = \App\Enums\DropshipOrderStatus::AUTO_REVIEW_PASS;
-                                $order->reviewed_at = now();
-                                $order->save();
-                                $successCount++;
-                                break;
-                            case AutomationRuleType::AUTO_PUSH_WMS:
-                                $order->status = \App\Enums\DropshipOrderStatus::PUSHING;
-                                $order->push_attempts = ($order->push_attempts ?? 0) + 1;
-                                $order->wms_order_no = 'WMS' . $order->id . time();
-                                $order->status = \App\Enums\DropshipOrderStatus::PUSH_SUCCESS;
-                                $order->pushed_at = now();
-                                $order->save();
-                                $successCount++;
-                                break;
-                            default:
-                                $successCount++;
-                        }
-                    } catch (\Throwable $e) {
-                        $failedCount++;
-                        $errors[] = [
-                            'order_id' => $order->id,
-                            'error' => $e->getMessage(),
-                        ];
-                    }
-                }
-
-                $rule->trigger_count = ($rule->trigger_count ?? 0) + $processedCount;
-                $rule->success_count = ($rule->success_count ?? 0) + $successCount;
-                $rule->failed_count = ($rule->failed_count ?? 0) + $failedCount;
-                $rule->last_triggered_at = now();
-                $rule->save();
-
-                return [
-                    'processed' => $processedCount,
-                    'success' => $successCount,
-                    'failed' => $failedCount,
-                    'errors' => array_slice($errors, 0, 10),
-                ];
-            });
+            $automationService = app(\App\Services\AutomationEngineService::class);
+            $result = $automationService->manualTrigger($rule->id);
 
             return response()->json([
                 'success' => true,
                 'data' => [
                     'rule_id' => $rule->id,
                     'rule_name' => $rule->name,
-                    'rule_type' => $type->label(),
+                    'rule_type' => $rule->getTypeEnum()->label(),
                     'processed_count' => $result['processed'],
                     'success_count' => $result['success'],
                     'failed_count' => $result['failed'],
-                    'errors' => $result['errors'],
+                    'errors' => array_slice(array_filter($result['details'], fn ($d) => !empty($d['error'])), 0, 10),
                     'triggered_at' => $rule->fresh()->last_triggered_at?->toDateTimeString(),
                     'total_trigger_count' => $rule->fresh()->trigger_count,
                     'total_success_count' => $rule->fresh()->success_count,

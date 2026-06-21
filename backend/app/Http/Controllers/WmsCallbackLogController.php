@@ -71,56 +71,18 @@ class WmsCallbackLogController extends Controller
         }
 
         try {
-            DB::beginTransaction();
+            $wmsService = app(\App\Services\WmsIntegrationService::class);
+            $wmsService->handleCallback($log);
 
-            $log->markProcessing();
+            $log->processed_by = request()->user()?->id;
+            $log->save();
 
-            $type = $log->getTypeEnum();
-            $requestBody = $log->getRequestBodyArray();
-
-            $processed = false;
-            $responseData = [];
-
-            switch ($type) {
-                case WmsCallbackType::ORDER_STATUS:
-                    $processed = $this->processOrderStatusCallback($log, $requestBody, $responseData);
-                    break;
-                case WmsCallbackType::SHIPMENT:
-                    $processed = $this->processShipmentCallback($log, $requestBody, $responseData);
-                    break;
-                case WmsCallbackType::TRACKING:
-                    $processed = $this->processTrackingCallback($log, $requestBody, $responseData);
-                    break;
-                case WmsCallbackType::INVENTORY:
-                    $processed = $this->processInventoryCallback($log, $requestBody, $responseData);
-                    break;
-                case WmsCallbackType::STOCK_ADJUST:
-                    $processed = $this->processStockAdjustCallback($log, $requestBody, $responseData);
-                    break;
-                default:
-                    $processed = true;
-                    $responseData = ['message' => '未知类型，标记为成功'];
-            }
-
-            if ($processed) {
-                $log->markSuccess(json_encode($responseData, JSON_UNESCAPED_UNICODE));
-                $log->processed_by = request()->user()?->id;
-                $log->save();
-                DB::commit();
-
-                return response()->json([
-                    'success' => true,
-                    'data' => new WmsCallbackLogResource($log->fresh()),
-                    'message' => '回调处理成功',
-                ]);
-            }
-
-            throw new \RuntimeException('回调处理逻辑返回失败');
+            return response()->json([
+                'success' => true,
+                'data' => new WmsCallbackLogResource($log->fresh()),
+                'message' => '回调处理成功',
+            ]);
         } catch (\Throwable $e) {
-            DB::rollBack();
-
-            $log->markFailed('RETRY_ERROR', $e->getMessage(), 5);
-
             return response()->json([
                 'success' => false,
                 'message' => '回调处理失败：' . $e->getMessage(),
@@ -462,6 +424,12 @@ class WmsCallbackLogController extends Controller
             'dropship_order_found' => $dropshipOrder !== null,
         ];
         $log->save();
+
+        try {
+            \App\Jobs\ProcessWmsCallbackJob::dispatch($log);
+        } catch (\Throwable $e) {
+            report($e);
+        }
 
         return response()->json([
             'success' => true,

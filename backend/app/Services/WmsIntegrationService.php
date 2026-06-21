@@ -7,6 +7,7 @@ use App\Enums\WmsCallbackType;
 use App\Models\DropshipOrder;
 use App\Models\OverseaWarehouseConfig;
 use App\Models\WmsCallbackLog;
+use App\Services\AutomationEngineService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
@@ -286,7 +287,30 @@ class WmsIntegrationService
         if ($targetStatus !== null) {
             $dropshipService = app(OverseaDropshipService::class);
             try {
+                $oldStatus = $order->getStatusEnum();
                 $dropshipService->updateDropshipStatus($order, $targetStatus, ['source' => 'tracking_sync']);
+
+                $this->triggerAutomationRules($order, $oldStatus, $targetStatus);
+            } catch (\Throwable $e) {
+                report($e);
+            }
+        }
+    }
+
+    protected function triggerAutomationRules(DropshipOrder $order, DropshipOrderStatus $oldStatus, DropshipOrderStatus $newStatus): void
+    {
+        $automationService = app(AutomationEngineService::class);
+
+        if ($newStatus === DropshipOrderStatus::EXCEPTION) {
+            $automationService->executeRulesForOrder($order, 'order_exception');
+        }
+
+        if ($newStatus === DropshipOrderStatus::SHIPPED
+            || $newStatus === DropshipOrderStatus::IN_TRANSIT
+            || $newStatus === DropshipOrderStatus::CUSTOMS
+        ) {
+            try {
+                $automationService->executeRulesForOrder($order, 'scheduled');
             } catch (\Throwable $e) {
                 report($e);
             }
@@ -331,10 +355,13 @@ class WmsIntegrationService
 
         $dropshipService = app(OverseaDropshipService::class);
         try {
+            $oldStatus = $order->getStatusEnum();
             $dropshipService->updateDropshipStatus($order, DropshipOrderStatus::SHIPPED, [
                 'source' => 'shipment_callback',
                 'tracking_no' => $order->tracking_no,
             ]);
+
+            $this->triggerAutomationRules($order, $oldStatus, DropshipOrderStatus::SHIPPED);
         } catch (\Throwable $e) {
             report($e);
         }

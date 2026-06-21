@@ -128,8 +128,12 @@ class DropshipOrder extends Model
 
     public function scopeInFulfillment(Builder $query): Builder
     {
-        return $query->whereIn('status', DropshipOrderStatus::PROCESSING->value)
-            ->orWhere('status', DropshipOrderStatus::PUSH_SUCCESS->value);
+        return $query->whereIn('status', [
+            DropshipOrderStatus::PROCESSING->value,
+            DropshipOrderStatus::PUSH_SUCCESS->value,
+            DropshipOrderStatus::PICKED->value,
+            DropshipOrderStatus::PACKED->value,
+        ]);
     }
 
     public function scopeInTransit(Builder $query): Builder

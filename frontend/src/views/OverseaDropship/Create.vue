@@ -522,8 +522,11 @@
         <div v-else>
           <el-button @click="prevStep">上一步</el-button>
           <el-button type="info" plain @click="goToStep(0)">重新编辑</el-button>
+          <el-button :loading="submitLoading" icon="el-icon-document" @click="handleSaveDraft">
+            保存为草稿
+          </el-button>
           <el-button type="success" :loading="submitLoading" icon="el-icon-check" @click="handleSubmit">
-            提交创建
+            提交并送审
           </el-button>
         </div>
       </div>
@@ -532,6 +535,8 @@
 </template>
 
 <script>
+import { createDropshipOrder } from '@/api/dropship'
+
 export default {
   name: 'OverseaDropshipCreate',
   data() {
@@ -733,18 +738,83 @@ export default {
         this.$router.back()
       }).catch(() => {})
     },
+    buildOrderData(submitNow = false) {
+      return {
+        order_id: null,
+        external_order_no: '',
+        warehouse_id: this.shippingForm.warehouseId,
+        supplier_id: null,
+        distributor_id: null,
+        source_channel: 'manual',
+        fulfillment_type: 'dropship',
+        shipping_method_code: this.shippingForm.shippingMethod,
+        receiver_name: this.receiverForm.name,
+        receiver_phone: this.receiverForm.phone,
+        receiver_email: this.receiverForm.email,
+        receiver_country: this.receiverForm.country,
+        receiver_state: this.receiverForm.state,
+        receiver_city: this.receiverForm.city,
+        receiver_postal_code: this.receiverForm.postalCode,
+        receiver_address: this.receiverForm.address,
+        currency: this.shippingForm.currency,
+        declared_value: this.shippingForm.declaredValue,
+        remark: this.submitRemark,
+        submit_now: submitNow,
+        items: this.productItems.map(item => ({
+          sku: item.sku,
+          product_name: item.name,
+          specification: item.spec,
+          quantity: item.quantity,
+          unit_price: item.price,
+          unit_cost: item.price * 0.7,
+          weight: item.weight,
+          hs_code: item.hsCode,
+          batch_no: item.batchNo
+        }))
+      }
+    },
+    handleSaveDraft() {
+      this.$confirm('确认保存为草稿吗？保存后可以后续再提交审核。', '保存确认', {
+        confirmButtonText: '保存草稿',
+        cancelButtonText: '返回修改',
+        type: 'info'
+      }).then(() => {
+        this.submitLoading = true
+        const orderData = this.buildOrderData(false)
+        createDropshipOrder(orderData).then(response => {
+          this.submitLoading = false
+          if (response.data && response.data.success) {
+            this.$message.success(`代发单【${response.data.data.dropship_no}】已保存为草稿`)
+            this.$router.push({ path: '/oversea-dropship' })
+          } else {
+            this.$message.error(response.data.message || '保存失败')
+          }
+        }).catch(error => {
+          this.submitLoading = false
+          this.$message.error(error.message || '保存失败')
+        })
+      }).catch(() => {})
+    },
     handleSubmit() {
-      this.$confirm('确认创建此代发单吗？提交后将进入审核流程。', '提交确认', {
-        confirmButtonText: '确认创建',
+      this.$confirm('确认提交此代发单吗？提交后将进入审核流程，可能会触发自动化规则。', '提交确认', {
+        confirmButtonText: '确认提交',
         cancelButtonText: '返回修改',
         type: 'success'
       }).then(() => {
         this.submitLoading = true
-        setTimeout(() => {
+        const orderData = this.buildOrderData(true)
+        createDropshipOrder(orderData).then(response => {
           this.submitLoading = false
-          this.$message.success(`代发单【${this.generatedNo}】创建成功，已提交审核`)
-          this.$router.push({ path: '/oversea-dropship' })
-        }, 1000)
+          if (response.data && response.data.success) {
+            this.$message.success(`代发单【${response.data.data.dropship_no}】创建成功，已提交审核`)
+            this.$router.push({ path: '/oversea-dropship' })
+          } else {
+            this.$message.error(response.data.message || '提交失败')
+          }
+        }).catch(error => {
+          this.submitLoading = false
+          this.$message.error(error.message || '提交失败')
+        })
       }).catch(() => {})
     }
   }

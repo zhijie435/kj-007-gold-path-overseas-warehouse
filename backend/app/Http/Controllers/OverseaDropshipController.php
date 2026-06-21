@@ -62,7 +62,7 @@ class OverseaDropshipController extends Controller
         $validated = $request->validate([
             'order_id' => ['nullable', 'integer', 'exists:orders,id'],
             'external_order_no' => ['nullable', 'string', 'max:64'],
-            'warehouse_id' => ['required', 'integer', 'exists:warehouses,id'],
+            'warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
             'supplier_id' => ['nullable', 'integer', 'exists:suppliers,id'],
             'distributor_id' => ['nullable', 'integer', 'exists:distributors,id'],
             'source_channel' => ['required', 'string', 'max:32'],
@@ -92,37 +92,36 @@ class OverseaDropshipController extends Controller
             'items.*.weight' => ['nullable', 'numeric', 'min:0'],
             'items.*.hs_code' => ['nullable', 'string', 'max:32'],
             'items.*.remark' => ['nullable', 'string', 'max:512'],
+            'submit_now' => ['nullable', 'boolean'],
         ]);
 
-        return DB::transaction(function () use ($validated, $request) {
-            $itemsData = $validated['items'];
-            unset($validated['items']);
+        try {
+            $submitNow = $validated['submit_now'] ?? false;
+            unset($validated['submit_now']);
 
-            $order = new DropshipOrder($validated);
-            $order->dropship_no = $order->generateDropshipNo();
-            $order->status = DropshipOrderStatus::DRAFT;
-            $order->created_by = $request->user()?->id;
-            $order->total_items = array_sum(array_column($itemsData, 'quantity'));
+            $service = app(\App\Services\OverseaDropshipService::class);
+            $order = $service->createDropshipOrder($validated, $request->user());
 
-            $subtotal = 0;
-            foreach ($itemsData as $item) {
-                $subtotal += ($item['quantity'] * $item['unit_price']);
-            }
-            $order->subtotal = round($subtotal, 2);
-            $order->total_cost = $order->calculateTotalCost();
-            $order->save();
+            $automationService = app(\App\Services\AutomationEngineService::class);
+            $automationService->executeRulesForOrder($order, 'order_created');
 
-            foreach ($itemsData as $itemData) {
-                $item = new DropshipOrderItem($itemData);
-                $item->subtotal = round(($itemData['quantity'] * $itemData['unit_price']), 2);
-                $order->items()->save($item);
+            if ($submitNow) {
+                $order = $service->updateDropshipStatus($order, DropshipOrderStatus::PENDING_REVIEW, [
+                    'source' => 'auto_submit',
+                ]);
+                $automationService->executeRulesForOrder($order, 'order_submitted');
             }
 
             return response()->json([
                 'success' => true,
                 'data' => new DropshipOrderResource($order->load('items')),
             ], HttpResponse::HTTP_CREATED);
-        });
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], HttpResponse::HTTP_BAD_REQUEST);
+        }
     }
 
     public function update(Request $request, DropshipOrder $order): JsonResponse
@@ -244,32 +243,39 @@ class OverseaDropshipController extends Controller
             'remark' => ['nullable', 'string', 'max:1024'],
         ]);
 
-        $userId = $request->user()?->id;
-        $now = now();
-
-        $targetStatus = $validated['pass']
-            ? DropshipOrderStatus::REVIEW_PASS
-            : DropshipOrderStatus::REVIEW_REJECT;
+        $service = app(\App\Services\OverseaDropshipService::class);
+        $automationService = app(\App\Services\AutomationEngineService::class);
+        $user = $request->user();
 
         $orders = DropshipOrder::query()
             ->whereIn('id', $validated['ids'])
-            ->whereIn('status', [DropshipOrderStatus::PENDING_REVIEW->value])
+            ->whereIn('status', [DropshipOrderStatus::PENDING_REVIEW->value, DropshipOrderStatus::DRAFT->value])
             ->get();
 
         $successCount = 0;
-        $failedIds = [];
+        $failed = [];
 
-        DB::transaction(function () use ($orders, $targetStatus, $validated, $userId, $now, &$successCount, &$failedIds) {
+        DB::transaction(function () use ($orders, $validated, $service, $automationService, $user, &$successCount, &$failed) {
             foreach ($orders as $order) {
                 try {
-                    $order->status = $targetStatus;
-                    $order->reviewed_at = $now;
-                    $order->reviewed_by = $userId;
-                    $order->review_remark = $validated['remark'] ?? null;
-                    $order->save();
+                    $service->reviewOrder(
+                        $order,
+                        $validated['pass'],
+                        $validated['remark'] ?? null,
+                        $user
+                    );
+
+                    if ($validated['pass']) {
+                        $automationService->executeRulesForOrder($order, 'review_passed');
+                    }
+
                     $successCount++;
                 } catch (\Throwable $e) {
-                    $failedIds[] = $order->id;
+                    $failed[] = [
+                        'id' => $order->id,
+                        'dropship_no' => $order->dropship_no,
+                        'error' => $e->getMessage(),
+                    ];
                 }
             }
         });
@@ -278,8 +284,8 @@ class OverseaDropshipController extends Controller
             'success' => true,
             'data' => [
                 'success_count' => $successCount,
-                'failed_count' => count($failedIds),
-                'failed_ids' => $failedIds,
+                'failed_count' => count($failed),
+                'failed' => $failed,
             ],
             'message' => "批量审核完成，成功 {$successCount} 条",
         ]);
@@ -292,58 +298,36 @@ class OverseaDropshipController extends Controller
             'remark' => ['nullable', 'string', 'max:1024'],
         ]);
 
-        if ($order->status !== DropshipOrderStatus::PENDING_REVIEW->value) {
+        try {
+            $service = app(\App\Services\OverseaDropshipService::class);
+            $order = $service->reviewOrder(
+                $order,
+                $validated['pass'],
+                $validated['remark'] ?? null,
+                $request->user()
+            );
+
+            $automationService = app(\App\Services\AutomationEngineService::class);
+            $automationService->executeRulesForOrder($order, 'review_passed');
+
+            return response()->json([
+                'success' => true,
+                'data' => new DropshipOrderResource($order->fresh()),
+                'message' => $validated['pass'] ? '审核通过' : '审核拒绝',
+            ]);
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => '订单状态不是待审核，无法审核',
+                'message' => $e->getMessage(),
             ], HttpResponse::HTTP_BAD_REQUEST);
         }
-
-        $targetStatus = $validated['pass']
-            ? DropshipOrderStatus::REVIEW_PASS
-            : DropshipOrderStatus::REVIEW_REJECT;
-
-        $order->status = $targetStatus;
-        $order->reviewed_at = now();
-        $order->reviewed_by = $request->user()?->id;
-        $order->review_remark = $validated['remark'] ?? null;
-        $order->save();
-
-        return response()->json([
-            'success' => true,
-            'data' => new DropshipOrderResource($order->fresh()),
-            'message' => $validated['pass'] ? '审核通过' : '审核拒绝',
-        ]);
     }
 
     public function push(DropshipOrder $order): JsonResponse
     {
-        if (!in_array($order->getRawOriginal('status'), [
-            DropshipOrderStatus::REVIEW_PASS->value,
-            DropshipOrderStatus::AUTO_REVIEW_PASS->value,
-            DropshipOrderStatus::PUSH_FAILED->value,
-        ], true)) {
-            return response()->json([
-                'success' => false,
-                'message' => '当前订单状态不允许推单',
-            ], HttpResponse::HTTP_BAD_REQUEST);
-        }
-
-        DB::beginTransaction();
         try {
-            $order->status = DropshipOrderStatus::PUSHING;
-            $order->push_attempts = ($order->push_attempts ?? 0) + 1;
-            $order->save();
-
-            $wmsOrderNo = 'WMS' . $order->id . time();
-
-            $order->wms_order_no = $wmsOrderNo;
-            $order->status = DropshipOrderStatus::PUSH_SUCCESS;
-            $order->pushed_at = now();
-            $order->push_error = null;
-            $order->save();
-
-            DB::commit();
+            $service = app(\App\Services\OverseaDropshipService::class);
+            $order = $service->pushToWms($order);
 
             return response()->json([
                 'success' => true,
@@ -351,12 +335,6 @@ class OverseaDropshipController extends Controller
                 'message' => '推单成功',
             ]);
         } catch (\Throwable $e) {
-            DB::rollBack();
-
-            $order->status = DropshipOrderStatus::PUSH_FAILED;
-            $order->push_error = $e->getMessage();
-            $order->save();
-
             return response()->json([
                 'success' => false,
                 'message' => '推单失败：' . $e->getMessage(),
@@ -382,29 +360,19 @@ class OverseaDropshipController extends Controller
             ->whereIn('status', $allowedStatuses)
             ->get();
 
+        $service = app(\App\Services\OverseaDropshipService::class);
+
         $successCount = 0;
         $failed = [];
 
         foreach ($orders as $order) {
             try {
-                DB::transaction(function () use ($order) {
-                    $order->status = DropshipOrderStatus::PUSHING;
-                    $order->push_attempts = ($order->push_attempts ?? 0) + 1;
-                    $order->save();
-
-                    $order->wms_order_no = 'WMS' . $order->id . time();
-                    $order->status = DropshipOrderStatus::PUSH_SUCCESS;
-                    $order->pushed_at = now();
-                    $order->push_error = null;
-                    $order->save();
-                });
+                $service->pushToWms($order);
                 $successCount++;
             } catch (\Throwable $e) {
-                $order->status = DropshipOrderStatus::PUSH_FAILED;
-                $order->push_error = $e->getMessage();
-                $order->save();
                 $failed[] = [
                     'id' => $order->id,
+                    'dropship_no' => $order->dropship_no,
                     'error' => $e->getMessage(),
                 ];
             }
@@ -428,33 +396,25 @@ class OverseaDropshipController extends Controller
             'remark' => ['nullable', 'string', 'max:1024'],
         ]);
 
-        $targetStatus = $validated['status'];
+        try {
+            $service = app(\App\Services\OverseaDropshipService::class);
+            $context = [];
+            if (!empty($validated['remark'])) {
+                $context['remark'] = $validated['remark'];
+            }
+            $order = $service->updateDropshipStatus($order, $validated['status'], $context);
 
-        if (!$order->getStatusEnum()->canTransitionTo($targetStatus)) {
+            return response()->json([
+                'success' => true,
+                'data' => new DropshipOrderResource($order->fresh()),
+                'message' => '状态更新成功',
+            ]);
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => "状态变更不允许从 {$order->getStatusEnum()->label()} 变更为 {$targetStatus->label()}",
+                'message' => $e->getMessage(),
             ], HttpResponse::HTTP_BAD_REQUEST);
         }
-
-        $order->status = $targetStatus;
-
-        $timestampField = $targetStatus->timestampField();
-        if ($timestampField !== null) {
-            $order->{$timestampField} = now();
-        }
-
-        if ($validated['remark'] ?? false) {
-            $order->remark = $validated['remark'];
-        }
-
-        $order->save();
-
-        return response()->json([
-            'success' => true,
-            'data' => new DropshipOrderResource($order->fresh()),
-            'message' => '状态更新成功',
-        ]);
     }
 
     public function cancel(Request $request, DropshipOrder $order): JsonResponse
@@ -463,37 +423,26 @@ class OverseaDropshipController extends Controller
             'reason' => ['nullable', 'string', 'max:1024'],
         ]);
 
-        if ($order->getStatusEnum()->isTerminal()) {
+        try {
+            $service = app(\App\Services\OverseaDropshipService::class);
+            $order = $service->cancelOrder($order, $validated['reason'] ?? '用户取消');
+
+            return response()->json([
+                'success' => true,
+                'data' => new DropshipOrderResource($order->fresh()),
+                'message' => '订单已取消',
+            ]);
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => '订单已处于终态，无法取消',
+                'message' => $e->getMessage(),
             ], HttpResponse::HTTP_BAD_REQUEST);
         }
-
-        if (!$order->getStatusEnum()->canTransitionTo(DropshipOrderStatus::CANCELLED)) {
-            return response()->json([
-                'success' => false,
-                'message' => '当前状态不允许取消',
-            ], HttpResponse::HTTP_BAD_REQUEST);
-        }
-
-        $order->status = DropshipOrderStatus::CANCELLED;
-        $order->cancelled_at = now();
-        if ($validated['reason'] ?? false) {
-            $order->remark = $validated['reason'];
-        }
-        $order->save();
-
-        return response()->json([
-            'success' => true,
-            'data' => new DropshipOrderResource($order->fresh()),
-            'message' => '订单已取消',
-        ]);
     }
 
     public function retryPush(DropshipOrder $order): JsonResponse
     {
-        if ($order->status !== DropshipOrderStatus::PUSH_FAILED->value) {
+        if ($order->getStatusEnum() !== DropshipOrderStatus::PUSH_FAILED) {
             return response()->json([
                 'success' => false,
                 'message' => '只有推单失败状态才能重试推单',
